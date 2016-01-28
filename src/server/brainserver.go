@@ -4,9 +4,12 @@ package server
 import ("bufio"
         "net"
         "fmt"
+        "settings"
+        "strconv"
         "utils")
 
 type Client struct {
+    id string
     name string
     incoming chan string
     outcoming chan string
@@ -17,11 +20,11 @@ type Client struct {
 
 func (client *Client) Read() {
     for {
-        line, err := client.reader.ReadString('\n')
+        line, err := client.reader.ReadString(settings.EOL)
         utils.ProcError(err)
         client.incoming <- line
     }
-} 
+}
 
 func (client *Client) Write() {
     for data := range client.outcoming {
@@ -35,14 +38,15 @@ func (client *Client) Listen() {
     go client.Write()
 }
 
-func NewClient(conn net.Conn) *Client {
+func NewClient(conn net.Conn, name string, id string) *Client {
     reader := bufio.NewReader(conn)
     writer := bufio.NewWriter(conn)
-    client := &Client{name: "a client",
+    client := &Client{name: name,
                      reader: reader,
                      writer: writer,
                      incoming: make(chan string),
-                     outcoming: make(chan string), }
+                     outcoming: make(chan string),
+                     id: id}
     client.Listen()
     return client
 }
@@ -51,7 +55,6 @@ type Game struct {
     clients []*Client
     joins chan net.Conn
     incoming chan string
-    outcoming chan string
 }
 
 func (game *Game) Broadcast(data string) {
@@ -61,9 +64,17 @@ func (game *Game) Broadcast(data string) {
 }
 
 func (game *Game) Join(conn net.Conn) {
-    client := NewClient(conn)
+    clientId := strconv.Itoa(len(game.clients) + 1)
+    client := NewClient(
+        conn, fmt.Sprintf("anonymous player %s", clientId), clientId)
     game.clients = append(game.clients, client)
-    go func() { for { game.incoming <- <-client.incoming } }()
+    game.Broadcast(fmt.Sprintf("'%s' has joined us!\n", client.name))
+    go func() {
+        for {
+            toSend := fmt.Sprintf("[%s] ", client.name) + <- client.incoming
+            game.incoming <- toSend
+        }
+    }()
 }
 
 func (game *Game) Listen() {
@@ -82,7 +93,6 @@ func (game *Game) Listen() {
 func NewGame() *Game {
     game := &Game{
         incoming: make(chan string),
-        outcoming: make(chan string),
         clients: make([]*Client, 0),
         joins: make(chan net.Conn),
     }
