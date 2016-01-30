@@ -5,17 +5,9 @@ import ("net"
         "fmt"
         "bufio"
         "os"
-        "settings"
         "time"
         "utils")
 
-func readData(reader *bufio.Reader, ch chan string, err chan error) {
-    for {
-        line, err := reader.ReadString(settings.EOL)
-        utils.ProcError(err)
-        ch <- line
-    }
-}
 
 func StartClient(server string, port int) {
     fmt.Println("Launching Brain Client...")
@@ -26,8 +18,8 @@ func StartClient(server string, port int) {
     errCh := make(chan error)
     // shellInvite := ">"
     // read data goroutine
-    go readData(bufio.NewReader(conn), chReceive, errCh)
-    go readData(bufio.NewReader(os.Stdin), chSend, errCh)
+    go utils.ReadData(bufio.NewReader(conn), chReceive, errCh)
+    go utils.ReadData(bufio.NewReader(os.Stdin), chSend, errCh)
     ticker := time.Tick(time.Second)
     for {
         select {

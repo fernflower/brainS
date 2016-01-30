@@ -1,9 +1,11 @@
 package utils
 
 
-import ("os"
-        "fmt")
-
+import ("bufio"
+        "fmt"
+        "os"
+        "settings"
+    )
 
 func ProcError(err error) {
     if err != nil {
@@ -13,4 +15,13 @@ func ProcError(err error) {
     }
 }
 
-
+func ReadData(reader *bufio.Reader, ch chan string, err chan error) {
+    for {
+        line, e := reader.ReadString(settings.EOL)
+        if e != nil {
+            err <- e
+        } else {
+            ch <- line
+        }
+    }
+}

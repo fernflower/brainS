@@ -2,12 +2,13 @@ package server
 
 
 import ("bufio"
-        "net"
         "fmt"
+        "net"
         "settings"
         "strconv"
         "strings"
-        "utils")
+        "utils"
+    )
 
 type Client struct {
     id string
@@ -17,6 +18,13 @@ type Client struct {
     reader *bufio.Reader
     writer *bufio.Writer
     isMaster bool
+}
+
+func (client *Client) GetName() string {
+    if client.isMaster {
+        return "(master) " + client.name
+    }
+    return client.name
 }
 
 func (client *Client) Read() {
@@ -56,9 +64,14 @@ type Game struct {
     clients []*Client
     joins chan net.Conn
     incoming chan string
+    master *Client
 }
 
 func (game *Game) Broadcast(data string) {
+    // if data doesn't end in EOL, add one
+    if !strings.HasSuffix(data, string(settings.EOL)) {
+        data = data + string(settings.EOL)
+    }
     for _, client := range game.clients {
         client.outcoming <- data
     }
@@ -75,8 +88,17 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
     }
     if cmdParts[0] == ":register" && len(cmdParts) == 2 {
         newName := strings.Join(cmdParts[1:len(cmdParts)], " ")
-        game.Broadcast(fmt.Sprintf("%s is now known as %s%s", client.name, newName, string(settings.EOL)))
+        game.Broadcast(fmt.Sprintf("%s is now known as %s", client.GetName(), newName))
         client.name = newName
+    } else if cmdParts[0] == ":master" {
+        if game.master != nil && client != game.master {
+            // FIXME ping master first, make sure it exists
+            fmt.Println(fmt.Sprintf("%s attempted to seize the crown!", client.GetName()))
+            return
+        }
+        game.Broadcast(fmt.Sprintf("%s is now the master of the game", client.GetName()))
+        client.isMaster = true
+        game.master = client
     } else {
         fmt.Println(fmt.Sprintf("Unknown command: '%s'", cmd))
     }
@@ -87,14 +109,14 @@ func (game *Game) Join(conn net.Conn) {
     client := NewClient(
         conn, fmt.Sprintf("anonymous player %s", clientId), clientId)
     game.clients = append(game.clients, client)
-    game.Broadcast(fmt.Sprintf("'%s' has joined us!\n", client.name))
+    game.Broadcast(fmt.Sprintf("'%s' has joined us!\n", client.GetName()))
     go func() {
         for {
             data := <- client.incoming
             if strings.HasPrefix(data, ":") {
                 game.ProcessCommand(data, client)
             } else {
-                toSend := fmt.Sprintf("[%s] %s", client.name, data)
+                toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
                 game.incoming <- toSend
             }
         }
