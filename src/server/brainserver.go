@@ -65,6 +65,7 @@ type Game struct {
     joins chan net.Conn
     incoming chan string
     master *Client
+    active bool
 }
 
 func (game *Game) Broadcast(data string) {
@@ -75,6 +76,14 @@ func (game *Game) Broadcast(data string) {
     for _, client := range game.clients {
         client.outcoming <- data
     }
+}
+
+func (game *Game) Inform(data string, client *Client) {
+    // if data doesn't end in EOL, add one
+    if !strings.HasSuffix(data, string(settings.EOL)) {
+        data = data + string(settings.EOL)
+    }
+    client.outcoming <- data
 }
 
 func (game *Game) ProcessCommand(cmd string, client *Client) {
@@ -94,11 +103,19 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
         if game.master != nil && client != game.master {
             // FIXME ping master first, make sure it exists
             fmt.Println(fmt.Sprintf("%s attempted to seize the crown!", client.GetName()))
+            game.Inform("The game has a master already", client)
             return
         }
         game.Broadcast(fmt.Sprintf("%s is now the master of the game", client.GetName()))
         client.isMaster = true
         game.master = client
+    } else if cmdParts[0] == ":start" {
+        if game.master != client {
+            game.Inform("Only master can start a new game!", client)
+            return
+        }
+        game.active = true
+        game.Broadcast("===========Next Round===========")
     } else {
         fmt.Println(fmt.Sprintf("Unknown command: '%s'", cmd))
     }
