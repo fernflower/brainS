@@ -6,6 +6,7 @@ import ("bufio"
         "fmt"
         "settings"
         "strconv"
+        "strings"
         "utils")
 
 type Client struct {
@@ -63,6 +64,24 @@ func (game *Game) Broadcast(data string) {
     }
 }
 
+func (game *Game) ProcessCommand(cmd string, client *Client) {
+    cmd = strings.Replace(cmd, string(settings.EOL), "", 1)
+    cmdSplit := strings.Split(cmd, " ")
+    var cmdParts []string
+    for i := 0; i < len(cmdSplit); i++ {
+        if cmdSplit[i] != "" {
+            cmdParts = append(cmdParts, cmdSplit[i])
+        }
+    }
+    if cmdParts[0] == ":register" && len(cmdParts) == 2 {
+        newName := strings.Join(cmdParts[1:len(cmdParts)], " ")
+        game.Broadcast(fmt.Sprintf("%s is now known as %s%s", client.name, newName, string(settings.EOL)))
+        client.name = newName
+    } else {
+        fmt.Println(fmt.Sprintf("Unknown command: '%s'", cmd))
+    }
+}
+
 func (game *Game) Join(conn net.Conn) {
     clientId := strconv.Itoa(len(game.clients) + 1)
     client := NewClient(
@@ -71,8 +90,13 @@ func (game *Game) Join(conn net.Conn) {
     game.Broadcast(fmt.Sprintf("'%s' has joined us!\n", client.name))
     go func() {
         for {
-            toSend := fmt.Sprintf("[%s] ", client.name) + <- client.incoming
-            game.incoming <- toSend
+            data := <- client.incoming
+            if strings.HasPrefix(data, ":") {
+                game.ProcessCommand(data, client)
+            } else {
+                toSend := fmt.Sprintf("[%s] %s", client.name, data)
+                game.incoming <- toSend
+            }
         }
     }()
 }
