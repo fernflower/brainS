@@ -7,6 +7,7 @@ import ("bufio"
         "settings"
         "strconv"
         "strings"
+        "time"
         "utils"
     )
 
@@ -18,6 +19,8 @@ type Client struct {
     reader *bufio.Reader
     writer *bufio.Writer
     isMaster bool
+    falseStart bool
+    pressTime time.Time
 }
 
 func (client *Client) GetName() string {
@@ -64,8 +67,11 @@ type Game struct {
     clients []*Client
     joins chan net.Conn
     incoming chan string
+    timeout chan time.Time
     master *Client
     active bool
+    time bool
+    buttonPressed *Client
 }
 
 func (game *Game) Broadcast(data string) {
@@ -86,7 +92,13 @@ func (game *Game) Inform(data string, client *Client) {
     client.outcoming <- data
 }
 
-func (game *Game) ProcessCommand(cmd string, client *Client) {
+func (game *Game) Reset() {
+    game.time = false
+    game.buttonPressed = nil
+}
+
+// return an array of token strings
+func sanitizeCommandString(cmd string) []string {
     cmd = strings.Replace(cmd, string(settings.EOL), "", 1)
     cmdSplit := strings.Split(cmd, " ")
     var cmdParts []string
@@ -95,6 +107,11 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
             cmdParts = append(cmdParts, cmdSplit[i])
         }
     }
+    return cmdParts
+}
+
+func (game *Game) ProcessCommand(cmd string, client *Client) {
+    cmdParts := sanitizeCommandString(cmd)
     if cmdParts[0] == ":register" && len(cmdParts) == 2 {
         newName := strings.Join(cmdParts[1:len(cmdParts)], " ")
         game.Broadcast(fmt.Sprintf("%s is now known as %s", client.GetName(), newName))
@@ -116,6 +133,21 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
         }
         game.active = true
         game.Broadcast("===========Next Round===========")
+    } else if cmdParts[0] == ":time" {
+        if game.master != client {
+            game.Inform("Only master can launch countdown!", client)
+            return
+        }
+        if !game.active {
+            game.Inform("Game must be started first!", client)
+            return
+        }
+        game.Reset()
+        game.time = true
+        go func() {
+            game.timeout <- <- time.After(
+                time.Duration(settings.RoundTimeout) * time.Second)
+        }()
     } else {
         fmt.Println(fmt.Sprintf("Unknown command: '%s'", cmd))
     }
@@ -132,13 +164,20 @@ func (game *Game) Join(conn net.Conn) {
             data := <- client.incoming
             if strings.HasPrefix(data, ":") {
                 game.ProcessCommand(data, client)
-            } else {
-                toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
-                game.incoming <- toSend
+            } else if data == "\n" {
+                /* special case: in game mode, after :time command,
+                ENTER press means button click
+                */
+                game.buttonPressed = client
+                game.Broadcast(fmt.Sprintf(
+                    "%s, your answer?", game.buttonPressed.GetName()))
+                } else {
+                    toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
+                    game.incoming <- toSend
+                }
             }
-        }
-    }()
-}
+        }()
+    }
 
 func (game *Game) Listen() {
     go func() {
@@ -148,6 +187,11 @@ func (game *Game) Listen() {
                 game.Broadcast(data)
             case conn := <-game.joins:
                 game.Join(conn)
+            case <- game.timeout:
+                if game.buttonPressed == nil {
+                    game.Broadcast("===========Time is Out===========")
+                    game.Reset()
+                }
             }
         }
     }()
@@ -156,6 +200,7 @@ func (game *Game) Listen() {
 func NewGame() *Game {
     game := &Game{
         incoming: make(chan string),
+        timeout: make(chan time.Time),
         clients: make([]*Client, 0),
         joins: make(chan net.Conn),
     }

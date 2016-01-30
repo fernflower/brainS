@@ -26,9 +26,8 @@ func StartClient(server string, port int) {
         case data := <-chReceive:
             fmt.Println(data)
         case data := <-chSend:
-            if data != "\n"{
-                fmt.Fprintf(conn, data)
-            }
+            // make sure plain '\n' can be sent
+            fmt.Fprintf(conn, data)
         case err := <-errCh:
             utils.ProcError(err)
         case <- ticker:
