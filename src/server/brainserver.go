@@ -69,7 +69,6 @@ type Game struct {
     incoming chan string
     timeout chan time.Time
     master *Client
-    active bool
     time bool
     buttonPressed *Client
 }
@@ -126,20 +125,9 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
         game.Broadcast(fmt.Sprintf("%s is now the master of the game", client.GetName()))
         client.isMaster = true
         game.master = client
-    } else if cmdParts[0] == ":start" {
-        if game.master != client {
-            game.Inform("Only master can start a new game!", client)
-            return
-        }
-        game.active = true
-        game.Broadcast("===========Next Round===========")
-    } else if cmdParts[0] == ":time" {
+    }  else if cmdParts[0] == ":time" {
         if game.master != client {
             game.Inform("Only master can launch countdown!", client)
-            return
-        }
-        if !game.active {
-            game.Inform("Game must be started first!", client)
             return
         }
         game.Reset()
@@ -164,7 +152,7 @@ func (game *Game) Join(conn net.Conn) {
             data := <- client.incoming
             if strings.HasPrefix(data, ":") {
                 game.ProcessCommand(data, client)
-            } else if data == "\n" {
+            } else if data == "\n" && game.time {
                 /* special case: in game mode, after :time command,
                 ENTER press means button click
                 */
