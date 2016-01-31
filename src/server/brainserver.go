@@ -148,6 +148,7 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
         game.timeout <- <- time.After(
             time.Duration(seconds) * time.Second)
         }()
+    game.Broadcast(fmt.Sprintf("===========%d seconds===========", seconds))
 }
 
 func (game *Game) modeSwitch(mode string, client *Client) {
