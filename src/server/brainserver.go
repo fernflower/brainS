@@ -20,6 +20,8 @@ type Client struct {
     writer *bufio.Writer
     isMaster bool
     canAnswer bool
+    // FIXME probably will needed to determine button click
+    // precedence regardless of race conditions
     pressTime time.Time
 }
 
@@ -70,8 +72,12 @@ type Game struct {
     incoming chan string
     timeout chan time.Time
     master *Client
-    time bool
     buttonPressed *Client
+    // when true any button click prior to time=true
+    // means false start
+    gameMode bool
+    // true if countdown has started
+    time bool
 }
 
 func (game *Game) Broadcast(data string) {
@@ -94,6 +100,7 @@ func (game *Game) Inform(data string, client *Client) {
 
 // makes all clients be able to answer again
 func (game *Game) Reset() {
+    game.gameMode = true
     game.time = false
     game.buttonPressed = nil
     for _, client := range game.clients {
@@ -127,6 +134,10 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
         } else {
             seconds = settings.RoundTimeout
         }
+    if !game.gameMode {
+        game.Inform("Enter game mode first!", client)
+        return
+    }
     if game.master != client {
         game.Inform("Only master can launch countdown!", client)
         return
@@ -137,6 +148,15 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
         game.timeout <- <- time.After(
             time.Duration(seconds) * time.Second)
         }()
+}
+
+func (game *Game) modeSwitch(mode string, client *Client) {
+    game.Reset()
+    if game.master != client {
+        game.Inform(fmt.Sprintf("Only master can switch to %s mode!", mode), client)
+        return
+    }
+    game.Broadcast(fmt.Sprintf("===========%s Mode On===========", mode))
 }
 
 func (game *Game) ProcessCommand(cmd string, client *Client) {
@@ -155,7 +175,14 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
         game.Broadcast(fmt.Sprintf("%s is now the master of the game", client.GetName()))
         client.isMaster = true
         game.master = client
-    }  else if cmdParts[0] == ":time" {
+    } else if cmdParts[0] == ":game" {
+        if game.master != client {
+            game.Inform("Only master can switch to game mode!", client)
+            return
+        }
+        game.gameMode = true
+        game.Broadcast("===========Game Mode On===========")
+    } else if cmdParts[0] == ":time" {
         game.procTimeCmd(cmdParts, client)
     } else if cmdParts[0] == ":reset" {
         if game.master != client {
@@ -163,9 +190,56 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
             return
         }
         game.Reset()
+    } else if cmdParts[0] == ":game" {
+        game.modeSwitch("game", client)
+        game.gameMode = true
+    } else if cmdParts[0] == ":chat" {
+        game.modeSwitch("chat", client)
+        game.gameMode = false
     } else {
         fmt.Println(fmt.Sprintf("Unknown command: '%s'", cmd))
     }
+}
+
+func (game *Game) procEventLoop(client *Client) {
+    for {
+        data := <- client.incoming
+        if strings.HasPrefix(data, ":") {
+            game.ProcessCommand(data, client)
+        } else if data == "\n" {
+            /* special case: in game mode ENTER press means button click
+               
+               a click prior :time command is considered as a false start 
+            */
+            if !game.gameMode {
+                // do not send empty messages when chatting, that's not polite!
+                continue
+            }
+            if !client.canAnswer {
+                game.Inform("You can't press button this round", client)
+                continue
+            }
+            if !game.time {
+                game.Broadcast(fmt.Sprintf("%s has a false start!", client.GetName()))
+                client.canAnswer = false
+                continue
+            }
+            game.buttonPressed = client
+            game.Broadcast(fmt.Sprintf(
+                "%s, your answer?", game.buttonPressed.GetName()))
+            } else if game.gameMode && client == game.buttonPressed && client.canAnswer {
+                // answering a question in game mode
+                client.canAnswer = false
+                toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
+                game.incoming <- toSend
+            } else if !game.gameMode {
+                // chat mode
+                toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
+                game.incoming <- toSend
+            } else {
+                game.Inform("You cannot chat right now!", client)
+            }
+        }
 }
 
 func (game *Game) Join(conn net.Conn) {
@@ -174,30 +248,8 @@ func (game *Game) Join(conn net.Conn) {
         conn, fmt.Sprintf("anonymous player %s", clientId), clientId)
     game.clients = append(game.clients, client)
     game.Broadcast(fmt.Sprintf("'%s' has joined us!", client.GetName()))
-    go func() {
-        for {
-            data := <- client.incoming
-            if strings.HasPrefix(data, ":") {
-                game.ProcessCommand(data, client)
-            } else if data == "\n" && game.time {
-                /* special case: in game mode, after :time command,
-                ENTER press means button click
-                */
-                if !client.canAnswer {
-                    game.Inform("You can't press button this round", client)
-                    continue
-                }
-                game.buttonPressed = client
-                game.Broadcast(fmt.Sprintf(
-                    "%s, your answer?", game.buttonPressed.GetName()))
-                client.canAnswer = false
-                } else {
-                    toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
-                    game.incoming <- toSend
-                }
-            }
-        }()
-    }
+    go game.procEventLoop(client)
+}
 
 func (game *Game) Listen() {
     go func() {
