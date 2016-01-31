@@ -19,7 +19,7 @@ type Client struct {
     reader *bufio.Reader
     writer *bufio.Writer
     isMaster bool
-    falseStart bool
+    canAnswer bool
     pressTime time.Time
 }
 
@@ -58,7 +58,8 @@ func NewClient(conn net.Conn, name string, id string) *Client {
                      writer: writer,
                      incoming: make(chan string),
                      outcoming: make(chan string),
-                     id: id}
+                     id: id,
+                     canAnswer: true}
     client.Listen()
     return client
 }
@@ -91,9 +92,13 @@ func (game *Game) Inform(data string, client *Client) {
     client.outcoming <- data
 }
 
+// makes all clients be able to answer again
 func (game *Game) Reset() {
     game.time = false
     game.buttonPressed = nil
+    for _, client := range game.clients {
+        client.canAnswer = true
+    }
 }
 
 // return an array of token strings
@@ -107,6 +112,31 @@ func sanitizeCommandString(cmd string) []string {
         }
     }
     return cmdParts
+}
+
+func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
+    var seconds int
+    var err error
+    if len(cmdParts) > 1 {
+        seconds, err = strconv.Atoi(cmdParts[1])
+        if err != nil {
+            game.Inform(fmt.Sprintf(
+                "Argument of time should be an integer, not '%s'", cmdParts[1]), client)
+                return
+            }
+        } else {
+            seconds = settings.RoundTimeout
+        }
+    if game.master != client {
+        game.Inform("Only master can launch countdown!", client)
+        return
+    }
+    game.buttonPressed = nil
+    game.time = true
+    go func() {
+        game.timeout <- <- time.After(
+            time.Duration(seconds) * time.Second)
+        }()
 }
 
 func (game *Game) ProcessCommand(cmd string, client *Client) {
@@ -126,16 +156,13 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
         client.isMaster = true
         game.master = client
     }  else if cmdParts[0] == ":time" {
+        game.procTimeCmd(cmdParts, client)
+    } else if cmdParts[0] == ":reset" {
         if game.master != client {
-            game.Inform("Only master can launch countdown!", client)
+            game.Inform("Only master can reset game!", client)
             return
         }
         game.Reset()
-        game.time = true
-        go func() {
-            game.timeout <- <- time.After(
-                time.Duration(settings.RoundTimeout) * time.Second)
-        }()
     } else {
         fmt.Println(fmt.Sprintf("Unknown command: '%s'", cmd))
     }
@@ -146,7 +173,7 @@ func (game *Game) Join(conn net.Conn) {
     client := NewClient(
         conn, fmt.Sprintf("anonymous player %s", clientId), clientId)
     game.clients = append(game.clients, client)
-    game.Broadcast(fmt.Sprintf("'%s' has joined us!\n", client.GetName()))
+    game.Broadcast(fmt.Sprintf("'%s' has joined us!", client.GetName()))
     go func() {
         for {
             data := <- client.incoming
@@ -156,9 +183,14 @@ func (game *Game) Join(conn net.Conn) {
                 /* special case: in game mode, after :time command,
                 ENTER press means button click
                 */
+                if !client.canAnswer {
+                    game.Inform("You can't press button this round", client)
+                    continue
+                }
                 game.buttonPressed = client
                 game.Broadcast(fmt.Sprintf(
                     "%s, your answer?", game.buttonPressed.GetName()))
+                client.canAnswer = false
                 } else {
                     toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
                     game.incoming <- toSend
