@@ -12,7 +12,6 @@ import ("bufio"
     )
 
 type Client struct {
-    id string
     name string
     incoming chan string
     outcoming chan string
@@ -52,7 +51,7 @@ func (client *Client) Listen() {
     go client.Write()
 }
 
-func NewClient(conn net.Conn, name string, id string) *Client {
+func NewClient(conn net.Conn, name string) *Client {
     reader := bufio.NewReader(conn)
     writer := bufio.NewWriter(conn)
     client := &Client{name: name,
@@ -60,7 +59,6 @@ func NewClient(conn net.Conn, name string, id string) *Client {
                      writer: writer,
                      incoming: make(chan string),
                      outcoming: make(chan string),
-                     id: id,
                      canAnswer: true}
     client.Listen()
     return client
@@ -78,6 +76,12 @@ type Game struct {
     gameMode bool
     // true if countdown has started
     time bool
+}
+
+type Message struct {
+    // fields should be exportable to ease the pain of testing
+    Text string
+    Visibility string
 }
 
 func (game *Game) Broadcast(data string) {
@@ -108,6 +112,11 @@ func (game *Game) Reset() {
     }
 }
 
+func (game *Game) SetMaster(client *Client) {
+    game.master = client
+    client.isMaster = true
+}
+
 // return an array of token strings
 func sanitizeCommandString(cmd string) []string {
     cmd = strings.Replace(cmd, string(settings.EOL), "", 1)
@@ -121,26 +130,23 @@ func sanitizeCommandString(cmd string) []string {
     return cmdParts
 }
 
-func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
+func (game *Game) procTimeCmd(cmdParts []string, client *Client) *Message {
     var seconds int
     var err error
     if len(cmdParts) > 1 {
         seconds, err = strconv.Atoi(cmdParts[1])
         if err != nil {
-            game.Inform(fmt.Sprintf(
-                "Argument of time should be an integer, not '%s'", cmdParts[1]), client)
-                return
+            return &Message{fmt.Sprintf(
+                "Argument of time should be an integer, not '%s'", cmdParts[1]), "client"}
             }
         } else {
             seconds = settings.RoundTimeout
         }
     if !game.gameMode {
-        game.Inform("Enter game mode first!", client)
-        return
+        return &Message{"Enter game mode first!", "client"}
     }
     if game.master != client {
-        game.Inform("Only master can launch countdown!", client)
-        return
+        return &Message{"Only master can launch countdown!", "client"}
     }
     game.buttonPressed = nil
     game.time = true
@@ -148,57 +154,60 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
         game.timeout <- <- time.After(
             time.Duration(seconds) * time.Second)
         }()
-    game.Broadcast(fmt.Sprintf("===========%d seconds===========", seconds))
+    return &Message{fmt.Sprintf("===========%d seconds===========", seconds), "all"}
 }
 
-func (game *Game) modeSwitch(mode string, client *Client) {
-    game.Reset()
+func (game *Game) modeSwitch(mode string, client *Client) (*Message, bool) {
     if game.master != client {
-        game.Inform(fmt.Sprintf("Only master can switch to %s mode!", mode), client)
-        return
+        return &Message{fmt.Sprintf("Only master can switch to %s mode!", mode), "client"}, false
     }
-    game.Broadcast(fmt.Sprintf("===========%s Mode On===========", mode))
+    game.Reset()
+    return &Message{fmt.Sprintf("===========%s Mode On===========", mode), "all"}, true
 }
 
-func (game *Game) ProcessCommand(cmd string, client *Client) {
+func (game *Game) ProcessCommand(cmd string, client *Client) *Message {
     cmdParts := sanitizeCommandString(cmd)
     if cmdParts[0] == ":register" && len(cmdParts) == 2 {
         newName := strings.Join(cmdParts[1:len(cmdParts)], " ")
-        game.Broadcast(fmt.Sprintf("%s is now known as %s", client.GetName(), newName))
+        oldName := client.GetName()
         client.name = newName
+        return &Message{fmt.Sprintf("%s is now known as %s", oldName, newName), "all"}
     } else if cmdParts[0] == ":master" {
         if game.master != nil && client != game.master {
             // FIXME ping master first, make sure it exists
             fmt.Println(fmt.Sprintf("%s attempted to seize the crown!", client.GetName()))
-            game.Inform("The game has a master already", client)
-            return
+            return &Message{"The game has a master already", "client"}
         }
-        game.Broadcast(fmt.Sprintf("%s is now the master of the game", client.GetName()))
-        client.isMaster = true
-        game.master = client
+        game.SetMaster(client)
+        return &Message{fmt.Sprintf("%s is now the master of the game", client.GetName()), "all"}
     } else if cmdParts[0] == ":game" {
         if game.master != client {
-            game.Inform("Only master can switch to game mode!", client)
-            return
+            return &Message{"Only master can switch to game mode!", "client"}
         }
         game.gameMode = true
-        game.Broadcast("===========Game Mode On===========")
+        return &Message{"===========Game Mode On===========", "all"}
     } else if cmdParts[0] == ":time" {
-        game.procTimeCmd(cmdParts, client)
+        return game.procTimeCmd(cmdParts, client)
     } else if cmdParts[0] == ":reset" {
         if game.master != client {
-            game.Inform("Only master can reset game!", client)
-            return
+            return &Message{"Only master can reset game!", "client"}
         }
         game.Reset()
-    } else if cmdParts[0] == ":game" {
-        game.modeSwitch("game", client)
-        game.gameMode = true
-    } else if cmdParts[0] == ":chat" {
-        game.modeSwitch("chat", client)
-        game.gameMode = false
+        return &Message{"======Game reset======", "client"}
+    } else if cmdParts[0] == ":game" || cmdParts[0] == ":chat" {
+        msg, done := game.modeSwitch(cmdParts[0], client)
+        if !done {
+            return msg
+        }
+        if cmdParts[0] == ":game" {
+            game.gameMode = true
+        } else {
+            game.gameMode = false
+        }
+        return msg
     } else {
-        fmt.Println(fmt.Sprintf("Unknown command: '%s'", cmd))
+        return &Message{fmt.Sprintf(
+            "Unknown command: '%s'", strings.Join(cmdParts, " ")), "client"}
     }
 }
 
@@ -206,7 +215,13 @@ func (game *Game) procEventLoop(client *Client) {
     for {
         data := <- client.incoming
         if strings.HasPrefix(data, ":") {
-            game.ProcessCommand(data, client)
+            func(message *Message){
+                if message.Visibility == "all" {
+                    game.Broadcast(message.Text)
+                } else {
+                    game.Inform(message.Text, client)
+                }
+            }(game.ProcessCommand(data, client))
         } else if data == "\n" {
             /* special case: in game mode ENTER press means button click
                
@@ -244,9 +259,9 @@ func (game *Game) procEventLoop(client *Client) {
 }
 
 func (game *Game) Join(conn net.Conn) {
-    clientId := strconv.Itoa(len(game.clients) + 1)
+    clientNum := strconv.Itoa(len(game.clients) + 1)
     client := NewClient(
-        conn, fmt.Sprintf("anonymous player %s", clientId), clientId)
+        conn, fmt.Sprintf("anonymous player %s", clientNum))
     game.clients = append(game.clients, client)
     game.Broadcast(fmt.Sprintf("'%s' has joined us!", client.GetName()))
     go game.procEventLoop(client)
