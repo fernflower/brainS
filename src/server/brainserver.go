@@ -1,17 +1,22 @@
 package server
 
 
-import ("bufio"
-        "fmt"
-        "net"
-        "settings"
-        "strconv"
-        "strings"
-        "time"
-        "utils"
-    )
+import (
+    "bufio"
+    "io"
+    "fmt"
+    "listener"
+    "net"
+    "settings"
+    "strconv"
+    "strings"
+    "time"
+    "utils"
+)
 
 type Client struct {
+    // a reference to game played
+    Game *Game
     name string
     incoming chan string
     outcoming chan string
@@ -22,6 +27,8 @@ type Client struct {
     // FIXME probably will needed to determine button click
     // precedence regardless of race conditions
     pressTime time.Time
+    // XXX FIXME Do we need to close it manually?
+    conn net.Conn
 }
 
 func (client *Client) GetName() string {
@@ -31,9 +38,18 @@ func (client *Client) GetName() string {
     return client.name
 }
 
+func (client *Client) SetName(name string) {
+    client.name = name
+}
+
 func (client *Client) Read() {
     for {
         line, err := client.reader.ReadString(settings.EOL)
+        if err == io.EOF {
+            fmt.Println("Client disconnected")
+            client.Exit()
+            return
+        }
         utils.ProcError(err)
         client.incoming <- line
     }
@@ -51,6 +67,28 @@ func (client *Client) Listen() {
     go client.Write()
 }
 
+func (client *Client) Exit() {
+    // XXX move to a game class function
+    game := client.Game
+    if game.master == client {
+        game.master = nil
+    }
+    clPos := func() int {
+        for i, cl := range game.Clients {
+            if cl == client {
+                return i
+            }
+        }
+        return -1
+    }()
+    if len(game.Clients) > 0 {
+        game.Clients = append(game.Clients[:clPos], game.Clients[clPos+1:]...)
+    }
+    fmt.Println(fmt.Sprintf("%d clients left", len(game.Clients)))
+    // XXX FIXME figure out if we need to close the connection
+    //client.conn.Close()
+}
+
 func NewClient(conn net.Conn, name string) *Client {
     reader := bufio.NewReader(conn)
     writer := bufio.NewWriter(conn)
@@ -59,13 +97,14 @@ func NewClient(conn net.Conn, name string) *Client {
                      writer: writer,
                      incoming: make(chan string),
                      outcoming: make(chan string),
-                     canAnswer: true}
+                     canAnswer: true, 
+                     conn: conn}
     client.Listen()
     return client
 }
 
 type Game struct {
-    clients []*Client
+    Clients []*Client
     joins chan net.Conn
     incoming chan string
     timeout chan time.Time
@@ -76,6 +115,13 @@ type Game struct {
     gameMode bool
     // true if countdown has started
     time bool
+    // notify when client wants to exit
+    exit chan bool
+    server *Server
+}
+
+func (game *Game) getStateChannel() chan string {
+    return game.server.stateCh
 }
 
 type Message struct {
@@ -89,7 +135,7 @@ func (game *Game) Broadcast(data string) {
     if !strings.HasSuffix(data, string(settings.EOL)) {
         data = data + string(settings.EOL)
     }
-    for _, client := range game.clients {
+    for _, client := range game.Clients {
         client.outcoming <- data
     }
 }
@@ -107,7 +153,7 @@ func (game *Game) Reset() {
     game.gameMode = true
     game.time = false
     game.buttonPressed = nil
-    for _, client := range game.clients {
+    for _, client := range game.Clients {
         client.canAnswer = true
     }
 }
@@ -157,17 +203,9 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) *Message {
     return &Message{fmt.Sprintf("===========%d seconds===========", seconds), "all"}
 }
 
-func (game *Game) modeSwitch(mode string, client *Client) (*Message, bool) {
-    if game.master != client {
-        return &Message{fmt.Sprintf("Only master can switch to %s mode!", mode), "client"}, false
-    }
-    game.Reset()
-    return &Message{fmt.Sprintf("===========%s Mode On===========", mode), "all"}, true
-}
-
 func (game *Game) ProcessCommand(cmd string, client *Client) *Message {
     cmdParts := sanitizeCommandString(cmd)
-    if cmdParts[0] == ":register" && len(cmdParts) == 2 {
+    if cmdParts[0] == ":rename" && len(cmdParts) == 2 {
         newName := strings.Join(cmdParts[1:len(cmdParts)], " ")
         oldName := client.GetName()
         client.name = newName
@@ -180,31 +218,37 @@ func (game *Game) ProcessCommand(cmd string, client *Client) *Message {
         }
         game.SetMaster(client)
         return &Message{fmt.Sprintf("%s is now the master of the game", client.GetName()), "all"}
+    }  else if cmdParts[0] == ":time" {
+        return game.procTimeCmd(cmdParts, client)
+    } else if cmdParts[0] == ":reset" {
+        if game.master != client {
+            return &Message{"Only master can reset the game!", "client"}
+        }
+        if !game.gameMode {
+            return &Message{"Enter game mode first!", "client"}
+        }
+        game.Reset()
+        return &Message{"======Game reset======", "client"}
     } else if cmdParts[0] == ":game" {
         if game.master != client {
             return &Message{"Only master can switch to game mode!", "client"}
         }
+        game.Reset()
         game.gameMode = true
         return &Message{"===========Game Mode On===========", "all"}
-    } else if cmdParts[0] == ":time" {
-        return game.procTimeCmd(cmdParts, client)
-    } else if cmdParts[0] == ":reset" {
+    } else if cmdParts[0] == ":chat" {
         if game.master != client {
-            return &Message{"Only master can reset game!", "client"}
+            return &Message{"Only master can switch to chat mode!", "client"}
         }
         game.Reset()
-        return &Message{"======Game reset======", "client"}
-    } else if cmdParts[0] == ":game" || cmdParts[0] == ":chat" {
-        msg, done := game.modeSwitch(cmdParts[0], client)
-        if !done {
-            return msg
+        game.gameMode = false
+        return &Message{"===========Chat Mode On===========", "all"}
+    } else if cmdParts[0] == ":exit" {
+        if game.master != client {
+            return &Message{"Only master can shutdown server!", "client"}
         }
-        if cmdParts[0] == ":game" {
-            game.gameMode = true
-        } else {
-            game.gameMode = false
-        }
-        return msg
+        game.exit <- true
+        return &Message{"Server will be shutdown!", "all"}
     } else {
         return &Message{fmt.Sprintf(
             "Unknown command: '%s'", strings.Join(cmdParts, " ")), "client"}
@@ -258,13 +302,22 @@ func (game *Game) procEventLoop(client *Client) {
         }
 }
 
-func (game *Game) Join(conn net.Conn) {
-    clientNum := strconv.Itoa(len(game.clients) + 1)
+func (game *Game) Join(conn net.Conn) *Client {
+    clientNum := strconv.Itoa(len(game.Clients) + 1)
     client := NewClient(
         conn, fmt.Sprintf("anonymous player %s", clientNum))
-    game.clients = append(game.clients, client)
+    // add client-game reference
+    client.Game = game
+    game.Clients = append(game.Clients, client)
+    fmt.Println(fmt.Sprintf("'%s' has joined. Total clients: %d", client.name, len(game.Clients)))
     game.Broadcast(fmt.Sprintf("'%s' has joined us!", client.GetName()))
+    // notify that client has been created
+    ch := game.getStateChannel()
+    if ch != nil {
+        ch <- "client created"
+    }
     go game.procEventLoop(client)
+    return client
 }
 
 func (game *Game) Listen() {
@@ -280,6 +333,9 @@ func (game *Game) Listen() {
                     game.Broadcast("===========Time is Out===========")
                     game.Reset()
                 }
+            case <- game.exit:
+                game.ExitGame()
+                return
             }
         }
     }()
@@ -289,22 +345,68 @@ func NewGame() *Game {
     game := &Game{
         incoming: make(chan string),
         timeout: make(chan time.Time),
-        clients: make([]*Client, 0),
+        Clients: make([]*Client, 0),
         joins: make(chan net.Conn),
+        exit: make(chan bool, 1),
     }
     game.Listen()
 
     return game
 }
 
-func StartServer(host string, port int) {
-    game := NewGame()
-    fmt.Println("Launching Brain Server...")
+func (game *Game) ExitGame() {
+    fmt.Printf("Shutting down server..")
+    game.server.listener.Stop()
+}
+
+type Server struct {
+    Games []*Game
+    // a channel passed from outside to monitor up/down state
+    listener *listener.StoppableListener
+    stateCh chan string
+}
+
+func NewServer(host string, port int, stateCh chan string) (*Server) {
     ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, port))
     utils.ProcError(err)
+    // use stoppable listener further on
+    sl, err := listener.New(ln)
+    utils.ProcError(err)
+    s := &Server{make([]*Game, 0), sl, stateCh}
+    return s
+}
+
+func (s *Server) Start(){
+    // for server start sync
+    game := NewGame()
+    game.server = s
+    s.Games = append(s.Games, game)
+    fmt.Println("Launching Brain Server...")
+    if s.stateCh != nil {
+        s.stateCh <- "server started"
+    }
     for {
-        conn, err := ln.Accept()
-        utils.ProcError(err)
+        conn, err := s.listener.Accept()
+        if err == listener.StoppedError {
+            // XXX FIXME
+            // ok, free all resources and exit
+            fmt.Printf("Disconnecting clients..")
+            for _, cl := range game.Clients {
+                cl.Exit()
+            }
+            if s.stateCh != nil {
+                s.stateCh <- "server shutdown"
+            }
+            return
+        } else {
+            utils.ProcError(err)
+        }
         game.joins <- conn
+    }
+}
+
+func (s *Server) Stop() {
+    for _, game := range s.Games {
+        game.exit <- true
     }
 }
