@@ -5,130 +5,140 @@ import (
     "net"
     "server"
     "testing"
+    "settings"
     "strings"
     "utils"
 )
 
-func createClient(s *server.Server, stateCh chan string, name string, master bool) *server.Client {
-    _, err := net.Dial("tcp", "127.0.0.1:9999")
-    utils.ProcError(err)
-    // FIXME XXX uncapsulation issues
-    game := s.Games[0]
+var stateCh chan string = make(chan string)
+
+func assert(expected string, actual string, t *testing.T) {
+    if actual != expected {
+        t.Errorf("Expected '%s', not '%s'", expected, actual)
+    }
+}
+
+func waitForData() string {
     for {
         select {
-        case <- stateCh:
-            cl := game.Clients[len(game.Clients) - 1]
-            cl.SetName(name)
-            if master {
-                game.SetMaster(cl)
+        case data:= <- stateCh:
+            if strings.HasSuffix(data, string(settings.EOL)) {
+                data = strings.Replace(data, string(settings.EOL), "", 1)
             }
-            return cl
+            return fmt.Sprintf("%s", data)
         default:
         }
     }
 }
 
-func startServer(stateCh chan string) *server.Server{
+func connect() (net.Conn, string) {
+    conn, err := net.Dial("tcp", "127.0.0.1:9999")
+    utils.ProcError(err)
+    return conn, waitForData()
+}
+
+// same as connect(), but sets up proper client name and master
+func enter(name string, master bool, t *testing.T) net.Conn {
+    conn, data := connect()
+    if !strings.HasSuffix(data, "has joined us!") {
+        t.Errorf("Not the thing expected: '%s'", data)
+    }
+    // FIXME check return value?
+    actual := getResponse(conn, fmt.Sprintf(":rename %s", name))
+    if !strings.HasSuffix(actual, fmt.Sprintf("is now known as %s", name)) {
+        t.Errorf("Not the thing expected: '%s'", actual)
+    }
+    if master {
+        actual = getResponse(conn, ":master")
+        if !strings.HasSuffix(actual, "is now the master of the game") {
+            t.Errorf("Not the thing expected: '%s'", actual)
+        }
+    }
+    return conn
+}
+
+func getResponse(conn net.Conn, data string) string {
+    if !strings.HasSuffix(data, string(settings.EOL)) {
+        data = data + string(settings.EOL)
+    }
+    fmt.Fprintf(conn, data)
+    return waitForData()
+}
+
+func startServer() (*server.Server, string) {
     s := server.NewServer("127.0.0.1", 9999, stateCh)
     go s.Start()
-    for {
-        select {
-        case <- stateCh:
-            fmt.Println("Server started successfully")
-            return s
-        default:
-        }
-    }
+    return s, waitForData()
 }
 
-func stopServer(s *server.Server, stateCh chan string) {
-    go func() {
-        s.Stop()
-    }()
-    for {
-        select {
-        case <- stateCh:
-            fmt.Println("Server shutdown successfully")
-            return
-        default:
-        }
-    }
+func stopServer(s *server.Server) string {
+    go s.Stop()
+    return waitForData()
 }
 
-func testGameCommands(t *testing.T, s *server.Server, stateCh chan string) {
-    if len(s.Games) != 1 {
-        t.Errorf("At least one game should be started!")
-    }
-    // create clients
-    masterClient := createClient(s, stateCh, "bb-8", true)
-    client := createClient(s, stateCh, "c-3po", false)
-    // XXX incapsulation issues
-    game := client.Game
-    if !strings.HasPrefix(masterClient.GetName(), "(master)") {
-        t.Errorf("Name should have a reference to master, not '%s'", masterClient.GetName())
-    }
+func TestChatCommands(t *testing.T) {
+    s, _ := startServer()
+    // create 2 ordinary clients
+    // would-be master
+    connM, actualM := connect()
+    expected := "(broadcast) 'anonymous player 1' has joined us!"
+    assert(expected, actualM, t)
+    // ordinary client
+    conn, actual := connect()
+    expected = "(broadcast) 'anonymous player 2' has joined us!"
+    assert(expected, actual, t)
+    // :master - create a master
+    masterActual := getResponse(connM, ":master")
+    expectedMaster := "(broadcast) (master) anonymous player 1 is now the master of the game"
+    assert(expectedMaster, masterActual, t)
+    // :master - make sure no 2 masters can exist
+    clientActual := getResponse(conn, ":master")
+    expected = "(whisper) The game has a master already"
+    assert(expected, clientActual, t)
+    // :rename
+    expectedMaster = "(broadcast) anonymous player 2 is now known as ArthurDent"
+    actual = getResponse(conn, ":rename ArthurDent")
+    assert(expectedMaster, actual, t)
+    expected = "(broadcast) (master) anonymous player 1 is now known as FordPrefect"
+    actual = getResponse(connM, ":rename FordPrefect")
+    assert(expected, actual, t)
+    // :chat
+    msg := "All right. How would you react if I said that I'm" +
+    " not from Guildford at all, but from a smal planet somewhere in" +
+    "the vicinity of Betelgeuse?"
+    expected = "(broadcast) [(master) FordPrefect] " + msg
+    actual = getResponse(connM, msg)
+    assert(expected, actual, t)
+    msg = "I don't know. Why, do you think it's the sort of" +
+    " thing you're likely to say?"
+    expected = "(broadcast) [ArthurDent] " + msg
+    actual = getResponse(conn, msg)
+    assert(expected, actual, t)
+    stopServer(s)
+}
+
+func TestGameCommands(t *testing.T) {
+    s, _ := startServer()
+    // create 2 clients
+    connM := enter("Team1", true, t)
+    conn := enter("Team2", false, t)
     // make sure that non-master can't use game commands
     commands := map[string]string {
-        ":game": "Only master can switch to game mode!",
-        ":reset": "Only master can reset the game!",
-        ":time": "Enter game mode first!",
-        ":master": "The game has a master already"}
+        ":game": "(whisper) Only master can switch to game mode!",
+        ":reset": "(whisper) Only master can reset the game!",
+        ":time": "(whisper) Enter game mode first!"}
     for cmd, expected := range commands {
-        msg := game.ProcessCommand(cmd, client)
-        if msg.Text != expected {
-            t.Errorf("Expected '%s', not '%s'", expected, msg.Text)
-        }
+        actual := getResponse(conn, cmd)
+        assert(expected, actual, t)
     }
-    // master can use any of the following
-    masterCommands := map[string]string {
-        ":game": "===========Game Mode On===========",
-        ":reset": "======Game reset======",
-        ":time 15": "===========15 seconds===========",
-        ":master": "(master) bb-8 is now the master of the game"}
-    for cmd, expected := range masterCommands {
-        msg := game.ProcessCommand(cmd, masterClient)
-        if msg.Text != expected {
-            t.Errorf("Expected '%s', not '%s'", expected, msg.Text)
-        }
-    }
-}
-
-func testChatCommands(t *testing.T, s *server.Server, stateCh chan string) {
-    if len(s.Games) != 1 {
-        t.Errorf("At least one game should be started!")
-    }
-    // create clients
-    masterClient := createClient(s, stateCh, "m1", true)
-    client := createClient(s, stateCh, "cl1", false)
-    // XXX incapsulation issues
-    game := client.Game
-    commands := map[string]string {
-        ":rename Arthur_Dent": fmt.Sprintf("%s is now known as %s", client.GetName(), "Arthur_Dent"),
-        ":chat": "===========Chat Mode On==========="}
+    // game commands are ok for master
+    commands = map[string]string {
+        ":game": "(broadcast) ===========Game Mode On===========",
+        ":reset": "(whisper) ======Game reset======",
+        ":time 15": "(broadcast) ===========15 seconds==========="}
     for cmd, expected := range commands {
-        msg := game.ProcessCommand(cmd, masterClient)
-        if msg.Text != expected {
-            t.Errorf("Expected '%s', not '%s'", expected, msg.Text)
-        }
+        actual := getResponse(connM, cmd)
+        assert(expected, actual, t)
     }
-}
-
-func TestStartStop(t *testing.T) {
-    stateCh := make(chan string)
-    s := startServer(stateCh)
-    client1 := createClient(s, stateCh, "client1", false)
-    client2 := createClient(s, stateCh, "client2", false)
-    client1.Exit()
-    client2.Exit()
-    stopServer(s, stateCh)
-}
-
-func TestMain(t *testing.T) {
-    stateCh := make(chan string)
-    funcs := []func(*testing.T, *server.Server, chan string){testGameCommands, testChatCommands}
-    for _, f := range funcs {
-        s := startServer(stateCh)
-        f(t, s, stateCh)
-        stopServer(s, stateCh)
-    }
+    stopServer(s)
 }

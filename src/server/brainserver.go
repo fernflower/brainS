@@ -120,10 +120,6 @@ type Game struct {
     server *Server
 }
 
-func (game *Game) getStateChannel() chan string {
-    return game.server.stateCh
-}
-
 type Message struct {
     // fields should be exportable to ease the pain of testing
     Text string
@@ -138,6 +134,7 @@ func (game *Game) Broadcast(data string) {
     for _, client := range game.Clients {
         client.outcoming <- data
     }
+    game.notifyListener(fmt.Sprintf("(broadcast) %s", data))
 }
 
 func (game *Game) Inform(data string, client *Client) {
@@ -146,6 +143,7 @@ func (game *Game) Inform(data string, client *Client) {
         data = data + string(settings.EOL)
     }
     client.outcoming <- data
+    game.notifyListener(fmt.Sprintf("(whisper) %s", data))
 }
 
 // makes all clients be able to answer again
@@ -311,13 +309,16 @@ func (game *Game) Join(conn net.Conn) *Client {
     game.Clients = append(game.Clients, client)
     fmt.Println(fmt.Sprintf("'%s' has joined. Total clients: %d", client.name, len(game.Clients)))
     game.Broadcast(fmt.Sprintf("'%s' has joined us!", client.GetName()))
-    // notify that client has been created
-    ch := game.getStateChannel()
-    if ch != nil {
-        ch <- "client created"
-    }
     go game.procEventLoop(client)
     return client
+}
+
+func (game *Game) notifyListener(msg string) {
+    // notify that client has been created
+    ch := game.server.stateCh
+    if ch != nil {
+        ch <- msg
+    }
 }
 
 func (game *Game) Listen() {
@@ -366,6 +367,13 @@ type Server struct {
     stateCh chan string
 }
 
+func (server *Server) notifyListener(msg string) {
+    // notify that client has been created
+    if server.stateCh != nil {
+        server.stateCh <- msg 
+    }
+}
+
 func NewServer(host string, port int, stateCh chan string) (*Server) {
     ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, port))
     utils.ProcError(err)
@@ -382,9 +390,7 @@ func (s *Server) Start(){
     game.server = s
     s.Games = append(s.Games, game)
     fmt.Println("Launching Brain Server...")
-    if s.stateCh != nil {
-        s.stateCh <- "server started"
-    }
+    s.notifyListener("server started")
     for {
         conn, err := s.listener.Accept()
         if err == listener.StoppedError {
@@ -394,9 +400,7 @@ func (s *Server) Start(){
             for _, cl := range game.Clients {
                 cl.Exit()
             }
-            if s.stateCh != nil {
-                s.stateCh <- "server shutdown"
-            }
+            s.notifyListener("server shutdown")
             return
         } else {
             utils.ProcError(err)
