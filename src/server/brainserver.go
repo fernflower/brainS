@@ -68,7 +68,6 @@ func (client *Client) Listen() {
 }
 
 func (client *Client) Exit() {
-    // XXX move to a game class function
     game := client.Game
     if game.master == client {
         game.master = nil
@@ -81,6 +80,11 @@ func (client *Client) Exit() {
         }
         return -1
     }()
+    if clPos == -1 {
+        // FIXME XXX
+        fmt.Println(fmt.Sprintf("WARN: Already cleaned up %s", client.name))
+        return
+    }
     if len(game.Clients) > 0 {
         game.Clients = append(game.Clients[:clPos], game.Clients[clPos+1:]...)
     }
@@ -118,12 +122,6 @@ type Game struct {
     // notify when client wants to exit
     exit chan bool
     server *Server
-}
-
-type Message struct {
-    // fields should be exportable to ease the pain of testing
-    Text string
-    Visibility string
 }
 
 func (game *Game) Broadcast(data string) {
@@ -174,23 +172,26 @@ func sanitizeCommandString(cmd string) []string {
     return cmdParts
 }
 
-func (game *Game) procTimeCmd(cmdParts []string, client *Client) *Message {
+func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
     var seconds int
     var err error
     if len(cmdParts) > 1 {
         seconds, err = strconv.Atoi(cmdParts[1])
         if err != nil {
-            return &Message{fmt.Sprintf(
-                "Argument of time should be an integer, not '%s'", cmdParts[1]), "client"}
-            }
-        } else {
-            seconds = settings.RoundTimeout
+            game.Inform(fmt.Sprintf(
+                "Argument of time should be an integer, not '%s'", cmdParts[1]), client)
+                return
         }
+    } else {
+        seconds = settings.RoundTimeout
+    }
     if !game.gameMode {
-        return &Message{"Enter game mode first!", "client"}
+        game.Inform("Enter game mode first!", client)
+        return
     }
     if game.master != client {
-        return &Message{"Only master can launch countdown!", "client"}
+        game.Inform("Only master can launch countdown!", client)
+        return
     }
     game.buttonPressed = nil
     game.time = true
@@ -198,58 +199,64 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) *Message {
         game.timeout <- <- time.After(
             time.Duration(seconds) * time.Second)
         }()
-    return &Message{fmt.Sprintf("===========%d seconds===========", seconds), "all"}
+    game.Broadcast(fmt.Sprintf("===========%d seconds===========", seconds))
 }
 
-func (game *Game) ProcessCommand(cmd string, client *Client) *Message {
+func (game *Game) ProcessCommand(cmd string, client *Client) {
     cmdParts := sanitizeCommandString(cmd)
     if cmdParts[0] == ":rename" && len(cmdParts) == 2 {
         newName := strings.Join(cmdParts[1:len(cmdParts)], " ")
         oldName := client.GetName()
         client.name = newName
-        return &Message{fmt.Sprintf("%s is now known as %s", oldName, newName), "all"}
+        game.Broadcast(fmt.Sprintf("%s is now known as %s", oldName, newName))
     } else if cmdParts[0] == ":master" {
         if game.master != nil && client != game.master {
             // FIXME ping master first, make sure it exists
             fmt.Println(fmt.Sprintf("%s attempted to seize the crown!", client.GetName()))
-            return &Message{"The game has a master already", "client"}
+            game.Inform("The game has a master already", client)
+            return
         }
         game.SetMaster(client)
-        return &Message{fmt.Sprintf("%s is now the master of the game", client.GetName()), "all"}
+        game.Broadcast(fmt.Sprintf("%s is now the master of the game", client.GetName()))
     }  else if cmdParts[0] == ":time" {
-        return game.procTimeCmd(cmdParts, client)
+        game.procTimeCmd(cmdParts, client)
     } else if cmdParts[0] == ":reset" {
         if game.master != client {
-            return &Message{"Only master can reset the game!", "client"}
+            game.Inform("Only master can reset the game!", client)
+            return
         }
         if !game.gameMode {
-            return &Message{"Enter game mode first!", "client"}
+            game.Inform("Enter game mode first!", client)
+            return
         }
         game.Reset()
-        return &Message{"======Game reset======", "client"}
+        game.Inform("======Game reset======", client)
     } else if cmdParts[0] == ":game" {
         if game.master != client {
-            return &Message{"Only master can switch to game mode!", "client"}
+            game.Inform("Only master can switch to game mode!", client)
+            return
         }
         game.Reset()
         game.gameMode = true
-        return &Message{"===========Game Mode On===========", "all"}
+        game.Broadcast("===========Game Mode On===========")
     } else if cmdParts[0] == ":chat" {
         if game.master != client {
-            return &Message{"Only master can switch to chat mode!", "client"}
+            game.Inform("Only master can switch to chat mode!", client)
+            return
         }
         game.Reset()
         game.gameMode = false
-        return &Message{"===========Chat Mode On===========", "all"}
+        game.Broadcast("===========Chat Mode On===========")
     } else if cmdParts[0] == ":exit" {
         if game.master != client {
-            return &Message{"Only master can shutdown server!", "client"}
+            game.Inform("Only master can shutdown server!", client)
+            return
         }
         game.exit <- true
-        return &Message{"Server will be shutdown!", "all"}
+        game.Broadcast("Server will be shutdown!")
     } else {
-        return &Message{fmt.Sprintf(
-            "Unknown command: '%s'", strings.Join(cmdParts, " ")), "client"}
+        game.Inform(fmt.Sprintf(
+            "Unknown command: '%s'", strings.Join(cmdParts, " ")), client)
     }
 }
 
@@ -257,13 +264,7 @@ func (game *Game) procEventLoop(client *Client) {
     for {
         data := <- client.incoming
         if strings.HasPrefix(data, ":") {
-            func(message *Message){
-                if message.Visibility == "all" {
-                    game.Broadcast(message.Text)
-                } else {
-                    game.Inform(message.Text, client)
-                }
-            }(game.ProcessCommand(data, client))
+            game.ProcessCommand(data, client)
         } else if data == "\n" {
             /* special case: in game mode ENTER press means button click
                
@@ -274,7 +275,7 @@ func (game *Game) procEventLoop(client *Client) {
                 continue
             }
             if !client.canAnswer {
-                game.Inform("You can't press button this round", client)
+                game.Inform("You can't press button now", client)
                 continue
             }
             if !game.time {
@@ -295,7 +296,7 @@ func (game *Game) procEventLoop(client *Client) {
                 toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
                 game.incoming <- toSend
             } else {
-                game.Inform("You cannot chat right now!", client)
+                game.Inform("You can't chat right now!", client)
             }
         }
 }
@@ -367,6 +368,14 @@ type Server struct {
     stateCh chan string
 }
 
+func (server *Server) addGame() *Game{
+    // for server start sync
+    game := NewGame()
+    game.server = server
+    server.Games = append(server.Games, game)
+    return game
+}
+
 func (server *Server) notifyListener(msg string) {
     // notify that client has been created
     if server.stateCh != nil {
@@ -385,12 +394,9 @@ func NewServer(host string, port int, stateCh chan string) (*Server) {
 }
 
 func (s *Server) Start(){
-    // for server start sync
-    game := NewGame()
-    game.server = s
-    s.Games = append(s.Games, game)
     fmt.Println("Launching Brain Server...")
     s.notifyListener("server started")
+    game := s.addGame()
     for {
         conn, err := s.listener.Accept()
         if err == listener.StoppedError {
