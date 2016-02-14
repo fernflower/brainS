@@ -95,7 +95,7 @@ func NewClient(conn net.Conn, name string) *Client {
                      writer: writer,
                      incoming: make(chan string),
                      outcoming: make(chan string),
-                     canAnswer: true, 
+                     canAnswer: true,
                      conn: conn}
     client.Listen()
     return client
@@ -271,14 +271,13 @@ func (game *Game) procEventLoop(client *Client) {
             game.ProcessCommand(data, client)
         } else if data == "\n" {
             /* special case: in game mode ENTER press means button click
-               
-               a click prior :time command is considered as a false start 
+               a click prior :time command is considered as a false start
             */
             if !game.gameMode {
                 // do not send empty messages when chatting, that's not polite!
                 continue
             }
-            if !client.canAnswer {
+            if !client.canAnswer || client != game.buttonPressed && game.buttonPressed != nil {
                 game.Inform("You can't press button now", client)
                 continue
             }
@@ -295,6 +294,7 @@ func (game *Game) procEventLoop(client *Client) {
                 client.canAnswer = false
                 toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
                 game.incoming <- toSend
+                game.buttonPressed = nil
             } else if !game.gameMode {
                 // chat mode
                 toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
@@ -390,7 +390,7 @@ func (server *Server) addGame() *Game{
 func (server *Server) notifyListener(msg string) {
     // notify that client has been created
     if server.stateCh != nil {
-        server.stateCh <- msg 
+        server.stateCh <- msg
     }
 }
 

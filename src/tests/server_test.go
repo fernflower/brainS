@@ -168,8 +168,8 @@ func TestMultiplePress(t *testing.T) {
     assert("(whisper) You can't chat right now!",
            getResponse(conn2, "Sorry for inconvenience"), t)
     // make sure other player can't press the button before some answer is given
-    // assert("(whisper) You can't press button now", 
-    //       getResponse(conn2, "\n"), t)
+    assert("(whisper) You can't press button now",
+           getResponse(conn2, "\n"), t)
     data = getResponse(conn1, "42")
     assert("(broadcast) [Team2] 42", data, t)
     // try press button second time
@@ -196,7 +196,7 @@ func TestTimingIssues(t *testing.T) {
     assert("(broadcast) Team1 has a false start!", getResponse(conn2, "\n"), t)
     assert("(broadcast) ===========2 seconds===========",
     getResponse(connM, ":time 2"), t)
-    // wait for timeout 
+    // wait for timeout
     data := waitForData()
     assert("(broadcast) ===========Time is Out===========", data, t)
     // game auto reset after timeout, no need to call :reset
