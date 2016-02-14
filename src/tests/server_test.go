@@ -126,7 +126,6 @@ func TestGameCommands(t *testing.T) {
     // create master and 2 clients
     connM := enter("Master", true, t)
     conn1 := enter("Team2", false, t)
-    enter("Team1", false, t)
     // make sure that non-master can't use game commands
     commands := map[string]string {
         ":game": "(whisper) Only master can switch to game mode!",
@@ -188,30 +187,26 @@ func TestTimingIssues(t *testing.T) {
     // false start and timeout
     s, _ := startServer()
     connM := enter("Master", true, t)
-    //conn1 := enter("Team2", false, t)
-    //conn2 := enter("Team1", false, t)
-    enter("Team1g", false, t)
+    conn1 := enter("Team2", false, t)
+    conn2 := enter("Team1", false, t)
     // enter game mode
     assert("(broadcast) ===========Game Mode On===========",
            getResponse(connM, ":game"), t)
     // Team1 has a false start
-    //assert("Teuam1 has a false start!", getResponse(conn2, "\n"), t)
-    //assert("(broadcast) ===========5 seconds===========",
-    //       getResponse(connM, ":time"), t)
-    /*
+    assert("(broadcast) Team1 has a false start!", getResponse(conn2, "\n"), t)
+    assert("(broadcast) ===========2 seconds===========",
+    getResponse(connM, ":time 2"), t)
     // wait for timeout 
-    //data := waitForData()
-    data := "s"
+    data := waitForData()
     assert("(broadcast) ===========Time is Out===========", data, t)
     // game auto reset after timeout, no need to call :reset
     assert("(broadcast) ===========5 seconds===========",
-           getResponse(connM, ":time 5"), t)
+           getResponse(connM, ":time"), t)
     data = getResponse(conn1, "\n")
     assert("(broadcast) Team2, your answer?", data, t)
     data = getResponse(conn1, "DO NOT PANIC")
     assert("(broadcast) [Team2] DO NOT PANIC", data, t)
     // make sure no false start occurs
-    assert("(whisper) You can't press button now", getResponse(conn1, "42"), t)
-    */
+    assert("(whisper) You can't press button now", getResponse(conn1, "\n"), t)
     stopServer(s)
 }

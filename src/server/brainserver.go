@@ -10,6 +10,7 @@ import (
     "settings"
     "strconv"
     "strings"
+    "sync"
     "time"
     "utils"
 )
@@ -29,6 +30,8 @@ type Client struct {
     pressTime time.Time
     // XXX FIXME Do we need to close it manually?
     conn net.Conn
+    // if true then already cleaned up
+    disconnected bool
 }
 
 func (client *Client) GetName() string {
@@ -49,6 +52,10 @@ func (client *Client) Read() {
             fmt.Println("Client disconnected")
             client.Exit()
             return
+        } else if err != nil && client.disconnected {
+            // XXX FIXME this read should not occur at all!!!
+            fmt.Println("WARN: reading from a disconnected client")
+            return
         }
         utils.ProcError(err)
         client.incoming <- line
@@ -68,29 +75,16 @@ func (client *Client) Listen() {
 }
 
 func (client *Client) Exit() {
+    // XXX FIXME figure out the proper way to close a connection
+    defer func() {
+        client.disconnected = true
+        client.conn.Close()
+    }()
+
     game := client.Game
     if game.master == client {
         game.master = nil
     }
-    clPos := func() int {
-        for i, cl := range game.Clients {
-            if cl == client {
-                return i
-            }
-        }
-        return -1
-    }()
-    if clPos == -1 {
-        // FIXME XXX
-        fmt.Println(fmt.Sprintf("WARN: Already cleaned up %s", client.name))
-        return
-    }
-    if len(game.Clients) > 0 {
-        game.Clients = append(game.Clients[:clPos], game.Clients[clPos+1:]...)
-    }
-    fmt.Println(fmt.Sprintf("%d clients left", len(game.Clients)))
-    // XXX FIXME figure out if we need to close the connection
-    //client.conn.Close()
 }
 
 func NewClient(conn net.Conn, name string) *Client {
@@ -122,6 +116,16 @@ type Game struct {
     // notify when client wants to exit
     exit chan bool
     server *Server
+}
+
+func (game *Game) GetClientsOnline() []*Client {
+    var online []*Client
+    for _, cl := range game.Clients {
+        if !cl.disconnected {
+            online = append(online, cl)
+        }
+    }
+    return online
 }
 
 func (game *Game) Broadcast(data string) {
@@ -308,7 +312,8 @@ func (game *Game) Join(conn net.Conn) *Client {
     // add client-game reference
     client.Game = game
     game.Clients = append(game.Clients, client)
-    fmt.Println(fmt.Sprintf("'%s' has joined. Total clients: %d", client.name, len(game.Clients)))
+    fmt.Println(fmt.Sprintf(
+        "'%s' has joined (%s). Total clients: %d", client.name, client.conn.RemoteAddr(), len(game.Clients)))
     game.Broadcast(fmt.Sprintf("'%s' has joined us!", client.GetName()))
     go game.procEventLoop(client)
     return client
@@ -336,7 +341,17 @@ func (game *Game) Listen() {
                     game.Reset()
                 }
             case <- game.exit:
-                game.ExitGame()
+                fmt.Println("Closing client connections..")
+                for _, cl := range game.Clients {
+                    fmt.Println(fmt.Sprintf("Disconnecting client %s", cl.conn.RemoteAddr()))
+                    if !cl.disconnected {
+                        cl.Exit()
+                    }
+                }
+                // for bug-evading purposes only
+                fmt.Println(fmt.Sprintf("Done! Clients left: %d", len(game.GetClientsOnline())))
+                fmt.Println("Shutting down server..")
+                game.server.listener.Stop()
                 return
             }
         }
@@ -356,16 +371,12 @@ func NewGame() *Game {
     return game
 }
 
-func (game *Game) ExitGame() {
-    fmt.Printf("Shutting down server..")
-    game.server.listener.Stop()
-}
-
 type Server struct {
     Games []*Game
     // a channel passed from outside to monitor up/down state
     listener *listener.StoppableListener
     stateCh chan string
+    wg *sync.WaitGroup
 }
 
 func (server *Server) addGame() *Game{
@@ -389,7 +400,7 @@ func NewServer(host string, port int, stateCh chan string) (*Server) {
     // use stoppable listener further on
     sl, err := listener.New(ln)
     utils.ProcError(err)
-    s := &Server{make([]*Game, 0), sl, stateCh}
+    s := &Server{make([]*Game, 0), sl, stateCh, &sync.WaitGroup{}}
     return s
 }
 
@@ -400,12 +411,6 @@ func (s *Server) Start(){
     for {
         conn, err := s.listener.Accept()
         if err == listener.StoppedError {
-            // XXX FIXME
-            // ok, free all resources and exit
-            fmt.Printf("Disconnecting clients..")
-            for _, cl := range game.Clients {
-                cl.Exit()
-            }
             s.notifyListener("server shutdown")
             return
         } else {
@@ -413,6 +418,7 @@ func (s *Server) Start(){
         }
         game.joins <- conn
     }
+    s.Stop()
 }
 
 func (s *Server) Stop() {

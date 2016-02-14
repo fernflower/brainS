@@ -54,5 +54,5 @@ func (sl *StoppableListener) Accept() (net.Conn, error) {
 
 func (sl *StoppableListener) Stop() {
     close(sl.stop)
-    sl.TCPListener.Close()
+    defer sl.TCPListener.Close()
 }
