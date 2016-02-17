@@ -11,6 +11,7 @@ import (
     "strconv"
     "strings"
     "sync"
+    "syscall"
     "time"
     "utils"
 )
@@ -46,15 +47,18 @@ func (client *Client) SetName(name string) {
 }
 
 func (client *Client) Read() {
+    game := client.Game
     for {
         line, err := client.reader.ReadString(settings.EOL)
-        if err == io.EOF {
-            fmt.Println("Client disconnected")
+        oe, ok := err.(*net.OpError)
+        if err == io.EOF || ok && oe.Err == syscall.ECONNRESET {
+            game.SystemMsg(
+                fmt.Sprintf("Client %s disconnected", client.conn.RemoteAddr()), true)
             client.Exit()
             return
         } else if err != nil && client.disconnected {
             // XXX FIXME this read should not occur at all!!!
-            fmt.Println("WARN: reading from a disconnected client")
+            game.SystemMsg("WARN: reading from a disconnected client", false)
             return
         }
         utils.ProcError(err)
@@ -64,7 +68,11 @@ func (client *Client) Read() {
 
 func (client *Client) Write() {
     for data := range client.outcoming {
-        client.writer.WriteString(data)
+        _, err := client.writer.WriteString(data)
+        if err != nil {
+            fmt.Println("aaaaa")
+            fmt.Println(err)
+        }
         client.writer.Flush()
     }
 }
@@ -75,7 +83,6 @@ func (client *Client) Listen() {
 }
 
 func (client *Client) Exit() {
-    // XXX FIXME figure out the proper way to close a connection
     defer func() {
         client.disconnected = true
         client.conn.Close()
@@ -128,12 +135,19 @@ func (game *Game) GetClientsOnline() []*Client {
     return online
 }
 
+func (game *Game) SystemMsg(data string, notify bool) {
+    fmt.Println(data)
+    if notify {
+        game.notifyListener(fmt.Sprintf("(system) %s", data))
+    }
+}
+
 func (game *Game) Broadcast(data string) {
     // if data doesn't end in EOL, add one
     if !strings.HasSuffix(data, string(settings.EOL)) {
         data = data + string(settings.EOL)
     }
-    for _, client := range game.Clients {
+    for _, client := range game.GetClientsOnline() {
         client.outcoming <- data
     }
     game.notifyListener(fmt.Sprintf("(broadcast) %s", data))
@@ -153,7 +167,7 @@ func (game *Game) Reset() {
     game.gameMode = true
     game.time = false
     game.buttonPressed = nil
-    for _, client := range game.Clients {
+    for _, client := range game.GetClientsOnline() {
         client.canAnswer = true
     }
 }
@@ -216,7 +230,7 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
     } else if cmdParts[0] == ":master" {
         if game.master != nil && client != game.master {
             // FIXME ping master first, make sure it exists
-            fmt.Println(fmt.Sprintf("%s attempted to seize the crown!", client.GetName()))
+            game.SystemMsg(fmt.Sprintf("%s attempted to seize the crown!", client.GetName()), false)
             game.Inform("The game has a master already", client)
             return
         }
@@ -312,8 +326,11 @@ func (game *Game) Join(conn net.Conn) *Client {
     // add client-game reference
     client.Game = game
     game.Clients = append(game.Clients, client)
-    fmt.Println(fmt.Sprintf(
-        "'%s' has joined (%s). Total clients: %d", client.name, client.conn.RemoteAddr(), len(game.Clients)))
+    game.SystemMsg(
+        fmt.Sprintf("'%s' has joined (%s). Total clients: %d",
+                    client.name, client.conn.RemoteAddr(),
+                    len(game.GetClientsOnline())),
+        true)
     game.Broadcast(fmt.Sprintf("'%s' has joined us!", client.GetName()))
     go game.procEventLoop(client)
     return client
@@ -341,16 +358,14 @@ func (game *Game) Listen() {
                     game.Reset()
                 }
             case <- game.exit:
-                fmt.Println("Closing client connections..")
-                for _, cl := range game.Clients {
-                    fmt.Println(fmt.Sprintf("Disconnecting client %s", cl.conn.RemoteAddr()))
-                    if !cl.disconnected {
-                        cl.Exit()
-                    }
+                game.SystemMsg("Closing client connections..", false)
+                for _, cl := range game.GetClientsOnline() {
+                    game.SystemMsg(fmt.Sprintf("Disconnecting client %s", cl.conn.RemoteAddr()), false)
+                    cl.Exit()
                 }
                 // for bug-evading purposes only
-                fmt.Println(fmt.Sprintf("Done! Clients left: %d", len(game.GetClientsOnline())))
-                fmt.Println("Shutting down server..")
+                game.SystemMsg(fmt.Sprintf("Done! Clients left: %d", len(game.GetClientsOnline())), true)
+                game.SystemMsg("Shutting down server..", false)
                 game.server.listener.Stop()
                 return
             }
@@ -405,13 +420,12 @@ func NewServer(host string, port int, stateCh chan string) (*Server) {
 }
 
 func (s *Server) Start(){
-    fmt.Println("Launching Brain Server...")
-    s.notifyListener("server started")
     game := s.addGame()
+    game.SystemMsg("Launching Brain Server...", true)
     for {
         conn, err := s.listener.Accept()
         if err == listener.StoppedError {
-            s.notifyListener("server shutdown")
+            game.SystemMsg("Server shutdown", true)
             return
         } else {
             utils.ProcError(err)

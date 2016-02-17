@@ -18,7 +18,7 @@ func assert(expected string, actual string, t *testing.T) {
     }
 }
 
-func waitForData() string {
+func waitForAnyData() string {
     for {
         select {
         case data:= <- stateCh:
@@ -31,10 +31,19 @@ func waitForData() string {
     }
 }
 
+func waitForData(msgType string) string {
+    for {
+        data := waitForAnyData()
+        if strings.HasPrefix(data, msgType) {
+            return data
+        }
+    }
+}
+
 func connect() (net.Conn, string) {
     conn, err := net.Dial("tcp", "127.0.0.1:9999")
     utils.ProcError(err)
-    return conn, waitForData()
+    return conn, waitForData("(broadcast)")
 }
 
 func disconnect(conn net.Conn) {
@@ -66,18 +75,18 @@ func getResponse(conn net.Conn, data string) string {
         data = data + string(settings.EOL)
     }
     fmt.Fprintf(conn, data)
-    return waitForData()
+    return waitForAnyData()
 }
 
 func startServer() (*server.Server, string) {
     s := server.NewServer("127.0.0.1", 9999, stateCh)
     go s.Start()
-    return s, waitForData()
+    return s, waitForData("(system)")
 }
 
 func stopServer(s *server.Server) string {
     go s.Stop()
-    return waitForData()
+    return waitForData("(system)")
 }
 
 func TestChatCommands(t *testing.T) {
@@ -197,7 +206,7 @@ func TestTimingIssues(t *testing.T) {
     assert("(broadcast) ===========2 seconds===========",
     getResponse(connM, ":time 2"), t)
     // wait for timeout
-    data := waitForData()
+    data := waitForAnyData()
     assert("(broadcast) ===========Time is Out===========", data, t)
     // game auto reset after timeout, no need to call :reset
     assert("(broadcast) ===========5 seconds===========",
@@ -208,5 +217,27 @@ func TestTimingIssues(t *testing.T) {
     assert("(broadcast) [Team2] DO NOT PANIC", data, t)
     // make sure no false start occurs
     assert("(whisper) You can't press button now", getResponse(conn1, "\n"), t)
+    stopServer(s)
+}
+
+func TestConnectDisconnect(t *testing.T) {
+    s, _ := startServer()
+    // mind that at least one active connection
+    // should remain to use waitForData
+    c1, _ := net.Dial("tcp", "127.0.0.1:9999")
+    assert("(system) Launching Brain Server...", waitForData("(system)"), t)
+    assert(fmt.Sprintf("(system) 'anonymous player 1' has joined (%s). Total clients: 1",
+        c1.LocalAddr()),
+        waitForData("(system)"), t)
+    c2, _ := net.Dial("tcp", "127.0.0.1:9999")
+    assert(fmt.Sprintf("(system) 'anonymous player 2' has joined (%s). Total clients: 2",
+        c2.LocalAddr()),
+        waitForData("(system)"), t)
+    c1.Close()
+    assert(fmt.Sprintf("(system) Client %s disconnected", c1.LocalAddr()),
+           waitForData("(system)"), t)
+    c2.Close()
+    assert(fmt.Sprintf("(system) Client %s disconnected", c2.LocalAddr()),
+           waitForData("(system)"), t)
     stopServer(s)
 }
