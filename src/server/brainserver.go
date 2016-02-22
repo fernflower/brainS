@@ -2,16 +2,16 @@ package server
 
 
 import (
-    "bufio"
-    "io"
+    "github.com/gorilla/websocket"
+  //  "io"
     "fmt"
     "listener"
     "net"
+    "net/http"
     "settings"
     "strconv"
     "strings"
-    "sync"
-    "syscall"
+//    "syscall"
     "time"
     "utils"
 )
@@ -22,15 +22,13 @@ type Client struct {
     name string
     incoming chan string
     outcoming chan string
-    reader *bufio.Reader
-    writer *bufio.Writer
     isMaster bool
     canAnswer bool
     // FIXME probably will needed to determine button click
     // precedence regardless of race conditions
     pressTime time.Time
     // XXX FIXME Do we need to close it manually?
-    conn net.Conn
+    conn *websocket.Conn
     // if true then already cleaned up
     disconnected bool
 }
@@ -49,31 +47,29 @@ func (client *Client) SetName(name string) {
 func (client *Client) Read() {
     game := client.Game
     for {
-        line, err := client.reader.ReadString(settings.EOL)
-        oe, ok := err.(*net.OpError)
-        if err == io.EOF || ok && oe.Err == syscall.ECONNRESET {
+        _, p, err := client.conn.ReadMessage()
+        oe, ok := err.(*websocket.CloseError)
+        if ok && (oe.Code == websocket.CloseNormalClosure || oe.Code == websocket.CloseGoingAway ||
+        oe.Code == websocket.CloseNoStatusReceived) {
             game.SystemMsg(
                 fmt.Sprintf("Client %s disconnected", client.conn.RemoteAddr()), true)
-            client.Exit()
-            return
-        } else if err != nil && client.disconnected {
+                client.Exit()
+                return
+        }
+        if err != nil && client.disconnected {
             // XXX FIXME this read should not occur at all!!!
             game.SystemMsg("WARN: reading from a disconnected client", false)
             return
         }
         utils.ProcError(err)
-        client.incoming <- line
+        client.incoming <- string(p)
     }
 }
 
 func (client *Client) Write() {
     for data := range client.outcoming {
-        _, err := client.writer.WriteString(data)
-        if err != nil {
-            fmt.Println("aaaaa")
-            fmt.Println(err)
-        }
-        client.writer.Flush()
+        // XXX error handling?
+        client.conn.WriteMessage(websocket.TextMessage, []byte(data))
     }
 }
 
@@ -94,12 +90,8 @@ func (client *Client) Exit() {
     }
 }
 
-func NewClient(conn net.Conn, name string) *Client {
-    reader := bufio.NewReader(conn)
-    writer := bufio.NewWriter(conn)
+func NewClient(conn *websocket.Conn, name string) *Client {
     client := &Client{name: name,
-                     reader: reader,
-                     writer: writer,
                      incoming: make(chan string),
                      outcoming: make(chan string),
                      canAnswer: true,
@@ -110,7 +102,6 @@ func NewClient(conn net.Conn, name string) *Client {
 
 type Game struct {
     Clients []*Client
-    joins chan net.Conn
     incoming chan string
     timeout chan time.Time
     master *Client
@@ -319,7 +310,7 @@ func (game *Game) procEventLoop(client *Client) {
         }
 }
 
-func (game *Game) Join(conn net.Conn) *Client {
+func (game *Game) Join(conn *websocket.Conn) *Client {
     clientNum := strconv.Itoa(len(game.Clients) + 1)
     client := NewClient(
         conn, fmt.Sprintf("anonymous player %s", clientNum))
@@ -350,8 +341,6 @@ func (game *Game) Listen() {
             select {
             case data := <-game.incoming:
                 game.Broadcast(data)
-            case conn := <-game.joins:
-                game.Join(conn)
             case <- game.timeout:
                 if game.buttonPressed == nil {
                     game.Broadcast("===========Time is Out===========")
@@ -378,7 +367,6 @@ func NewGame() *Game {
         incoming: make(chan string),
         timeout: make(chan time.Time),
         Clients: make([]*Client, 0),
-        joins: make(chan net.Conn),
         exit: make(chan bool, 1),
     }
     game.Listen()
@@ -387,15 +375,15 @@ func NewGame() *Game {
 }
 
 type Server struct {
+    *http.Server
     Games []*Game
-    // a channel passed from outside to monitor up/down state
+    joins chan websocket.Conn
     listener *listener.StoppableListener
+    // a channel passed from outside to monitor up/down state
     stateCh chan string
-    wg *sync.WaitGroup
 }
 
 func (server *Server) addGame() *Game{
-    // for server start sync
     game := NewGame()
     game.server = server
     server.Games = append(server.Games, game)
@@ -403,7 +391,6 @@ func (server *Server) addGame() *Game{
 }
 
 func (server *Server) notifyListener(msg string) {
-    // notify that client has been created
     if server.stateCh != nil {
         server.stateCh <- msg
     }
@@ -415,24 +402,33 @@ func NewServer(host string, port int, stateCh chan string) (*Server) {
     // use stoppable listener further on
     sl, err := listener.New(ln)
     utils.ProcError(err)
-    s := &Server{make([]*Game, 0), sl, stateCh, &sync.WaitGroup{}}
+    httpServer := &http.Server{Addr: fmt.Sprintf("%s:%d", host, port)}
+    s := &Server{httpServer, make([]*Game, 0), make(chan websocket.Conn), sl, stateCh}
     return s
 }
 
 func (s *Server) Start(){
+    var upgrader = websocket.Upgrader{}
     game := s.addGame()
     game.SystemMsg("Launching Brain Server...", true)
-    for {
-        conn, err := s.listener.Accept()
-        if err == listener.StoppedError {
-            game.SystemMsg("Server shutdown", true)
-            return
-        } else {
-            utils.ProcError(err)
-        }
-        game.joins <- conn
+    handleConn := func(w http.ResponseWriter, r *http.Request) {
+        conn, err := upgrader.Upgrade(w, r, nil)
+        utils.ProcError(err)
+        s.joins <- *conn
     }
-    s.Stop()
+    go func() {
+        for {
+            select {
+                case conn := <-s.joins:
+                    game.Join(&conn)
+                default:
+            }
+        }
+    }()
+    http.Handle("/", http.FileServer(http.Dir("./static")))
+    http.HandleFunc("/connect", handleConn)
+    s.Serve(s.listener)
+    defer s.Stop()
 }
 
 func (s *Server) Stop() {
