@@ -3,7 +3,11 @@
 <head>
 <title>Chat Example</title>
 <script src="//ajax.googleapis.com/ajax/libs/jquery/2.0.3/jquery.min.js"></script>
+<script src="js/bootstrap.min.js"></script>
+<link href="css/bootstrap.min.css" rel="stylesheet">
+
 <script type="text/javascript">
+    var state = "chat";
     $(function() {
 
     var conn;
@@ -19,15 +23,44 @@
         }
     }
 
-    $("#form").submit(function() {
+    function changeState(newState) {
+        if (newState == "game") {
+            $("#pressBut").text("Answer");
+            $("#msg").attr("disabled", true);
+            $("#pressBut").focus()
+        } else if (newState == "answer") {
+            $("#msg").attr("disabled", false);
+        } else if (newState == "chat") {
+            $("#pressBut").text("Send");
+            $("#msg").attr("disabled", false);
+            $("#msg").focus()
+        }
+        state = newState
+        return false;
+    }
+
+    $("#pressBut").click(function() {
         if (!conn) {
             return false;
         }
-        if (!msg.val()) {
-            return false;
+        if (state == "chat") {
+            if (!msg.val()) {
+                return false;
+            }
+            conn.send(msg.val());
+            msg.val("");
+            return false
         }
-        conn.send(msg.val());
-        msg.val("");
+        if (state == "game") {
+            // empty string is valid for game mode (button press)
+            if (!msg.val()) {
+                conn.send("\n");
+                return false;
+            }
+            conn.send(msg.val());
+            msg.val("");
+            return false
+        }
         return false
     });
 
@@ -38,11 +71,22 @@
         }
         conn.onmessage = function(evt) {
             appendLog($("<div/>").text(evt.data))
+                // FIXME XXX damn, that's awful, change data from server to json (state, msg)
+                if (evt.data.search("Game Mode") > -1) {
+                    changeState("game");
+                } else if (evt.data.search("Chat Mode") > -1) {
+                    changeState("chat");
+                } else if (evt.data.search("your answer") > -1) {
+                    changeState("answer");
+                } else if (evt.data.search("Game Reset") > -1 || evt.data.search("Time is Out") > -1) {
+                    changeState("game");
+                }
         }
     } else {
         appendLog($("<div><b>Your browser does not support WebSockets.</b></div>"))
     }
     });
+$(document).ready(function(){$("#msg").focus()})
 </script>
 <style type="text/css">
 html {
@@ -62,7 +106,7 @@ body {
     background: white;
     margin: 0;
     padding: 0.5em 0.5em 0.5em 0.5em;
-    position: absolute;
+    position: relative;
     top: 0.5em;
     left: 0.5em;
     right: 0.5em;
@@ -83,10 +127,27 @@ body {
 </style>
 </head>
 <body>
+<form class="form-horizontal">
+    <fieldset>
+        <!-- Form Name -->
+        <legend>Master Control</legend>
+
+        <!-- Button (Double) -->
+        <div class="form-group">
+              <label class="col-md-4 control-label" for="button1id">Double Button</label>
+              <div class="col-md-8">
+                  <button id="button1id" name="button1id" class="btn btn-success">Good Button</button>
+                  <button id="button2id" name="button2id" class="btn btn-danger">Scary Button</button>
+              </div>
+        </div>
+
+    </fieldset>
 <div id="log"></div>
+</form>
+
 <form id="form">
-    <input type="submit" value="Send" />
     <input type="text" id="msg" size="64"/>
+    <button type="submit" id="pressBut">Send</>
 </form>
 </body>
 </html>
