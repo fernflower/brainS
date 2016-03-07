@@ -1,5 +1,11 @@
 var state = "chat";
 var client = "";
+var master = ""
+var images = {};
+var beeplong = new Audio("beep_long.mp3");
+var beep = new Audio("beep.mp3");
+var beep_int = null;
+
 $(function() {
 
 var conn;
@@ -33,25 +39,35 @@ function publishMessage(text, author) {
         side = "right";
         opp_side = "left";
     }
-    var html = "<li class='clearfix " + side + "'><span class='chat-img pull-'" + side + 
-        "><img src='http://placehold.it/50/" + getColor() + "/fff&text=U' class='img-circle' /></span>" +
+    if (!(author in images)) {
+        img = "http://placehold.it/50/" + getColor() + "/fff&text=U";
+        images[author] = img;
+    }
+    var html = "<li class='clearfix " + side + "'><span class='chat-img pull-" + opp_side + 
+        "'><img src='" + images[author] + "' class='img-circle' /></span>" +
         "<div class='chat-body clearfix'><div class='header'><strong class='pull-" +
-        opp_side + " primary-font'>" + author + "</strong></div><p>" + text + "</p></div></li>"
+        opp_side + " primary-font'>" + author + "</strong></div><p>" + text + "</p></div></li>";
     return appendLog(html, side)
 }
 
 function changeState(newState) {
+    clearInterval(beep_int);
     if (newState == "game") {
         $("#pressBut").text("Answer");
-        $("#pressBut").focus()
+        $("#pressBut").focus();
     } else if (newState == "answer") {
         msg.attr("disabled", false);
     } else if (newState == "chat") {
         $("#pressBut").text("Send");
         msg.attr("disabled", false);
-        msg.focus()
+        msg.focus();
+    } else if (newState == "timeout") {
+        beeplong.play();
+    } else if (newState == "5sec") {
+        beep.play();
+        beep_int = setInterval(function(){beep.play();}, 1000);
     }
-    state = newState
+    state = newState;
     return false;
 }
 
@@ -67,17 +83,25 @@ $("#pressBut").click(function() {
         msg.val("");
         return false
     }
-    if (state == "game") {
-        // empty string is valid for game mode (button press)
-        if (!msg.val()) {
-            conn.send("\n");
-            return false;
-        }
-        conn.send(msg.val());
-        msg.val("");
-        return false
-    }
+    var toSend = !msg.val() ? "\n" : msg.val(); 
+    conn.send(toSend);
+    msg.val("");
     return false
+});
+
+$("#master_controls").on("show.bs.collapse", function(){
+    conn.send(":master");
+    $("#master").attr("disabled", true);
+});
+
+$(".master").click(function() {
+    if (client != master) {
+        return false;
+    }
+    // a hack, mind ids
+    cmd = ":" + this.id;
+    conn.send(cmd);
+    return false;
 });
 
 if (window["WebSocket"]) {
@@ -89,24 +113,25 @@ if (window["WebSocket"]) {
         data = JSON.parse(evt.data);
         if (data.Type == "whoami") {
             client = data.Name;
-            isMaster = data.IsMaster;
+            master = data.MasterName;
+            if (master != "" && client != master) {
+                $("#master").hide()
+            }
             return
         }
         var text = data.Text
         publishMessage(data.Text, data.Name);
-            // FIXME XXX damn, that's awful, change data from server to json (state, msg)
-            if (data.State == "game") {
-                changeState("game");
-            } else if (data.State == "chat") {
-                changeState("chat");
-            } else if (text.search("your answer") > -1) {
-                changeState("answer");
-            } else if (text.search("Game Reset") > -1 || text.search("Time is Out") > -1) {
-                changeState("game");
-            }
+        // FIXME XXX damn, that's awful, change data from server to json (state, msg)
+        if (text.search("Game Reset") > -1) {
+            changeState("game");
+        } else {
+            changeState(data.State);
+        }
     }
 } else {
     appendLog($("<div><b>Your browser does not support WebSockets.</b></div>"), "left")
 }
 });
-$(document).ready(function(){msg.focus()})
+$(document).ready(function(){
+    msg.focus();
+})

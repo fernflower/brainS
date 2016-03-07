@@ -12,16 +12,20 @@
 <body>
 
 <div class="container">
-<div class="row">
-      <hr>
-      <button type="button" class="btn btn-primary master" id="game">Start Game</button>
-      <button type="button" class="btn btn-secondary master" id="time">Time</button>
-      <button type="button" class="btn btn-secondary master" id="reset">Reset</button>
-      <hr>
+<hr>
+<button type="button" data-toggle="collapse" data-target="#master_controls" class="btn btn-warning" id="master">
+  Become Master
+</button>
+<hr>
+<div class="collapse" id="master_controls">
+  <button type="button" class="btn btn-primary master" id="game">Start Game</button>
+  <button type="button" class="btn btn-secondary master" id="time">Time</button>
+  <button type="button" class="btn btn-secondary master" id="reset">Reset</button>
+<hr>
 </div>
 
 <div class="row">
-  <div class="col-md">
+  <div class="col-sm">
     <div class="panel panel-primary">
       <div class="panel-heading">
         <span class="glyphicon glyphicon-comment"></span> Chat

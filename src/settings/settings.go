@@ -7,4 +7,4 @@ var EOL byte = '\n'
 
 // game relevant
 // default timeout in seconds
-var RoundTimeout int = 5
+var RoundTimeout int = 7

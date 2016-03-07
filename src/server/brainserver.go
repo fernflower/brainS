@@ -19,14 +19,10 @@ type Client struct {
     // a reference to game played
     Game *Game
     name string
-    incoming chan string
+    incoming chan string 
     outcoming chan string
     isMaster bool
     canAnswer bool
-    // FIXME probably will needed to determine button click
-    // precedence regardless of race conditions
-    pressTime time.Time
-    // XXX FIXME Do we need to close it manually?
     conn *websocket.Conn
     // if true then already cleaned up
     disconnected bool
@@ -61,21 +57,18 @@ func (client *Client) Read() {
             return
         }
         utils.ProcError(err)
-        client.incoming <- string(p)
+        m := Message{"plain", client.GetName(), string(p), game.GetMaster(), game.state}
+        client.incoming <- m.ToString()
     }
 }
 
 func (client *Client) Write() {
     for data := range client.outcoming {
-        // if data is json already (out  of ordinary case) -> send it as it is
-        // otherwise convert to json and send as typical message
         var s map[string] interface{}
         if json.Unmarshal([]byte(data), &s) != nil {
-            m := Message{client.name, data, client.Game.state, "plain"}
-            // XXX error handling!
-            _, err := json.Marshal(m)
-            utils.ProcError(err)
-            client.conn.WriteJSON(m)
+            // XXX FIXME too bad to assume that in case of plain broadcast/inform master says that 
+            msg := Message{"plain", "Brain Bot", data, client.Game.GetMaster(), client.Game.state}
+            client.conn.WriteJSON(msg)
         } else {
             client.conn.WriteJSON(s)
         }
@@ -112,7 +105,6 @@ func NewClient(conn *websocket.Conn, name string) *Client {
 type Game struct {
     Clients []*Client
     incoming chan string
-    timeout chan time.Time
     master *Client
     buttonPressed *Client
     // chat, game, answer
@@ -121,7 +113,15 @@ type Game struct {
     time bool
     // notify when client wants to exit
     exit chan bool
+    timer *time.Timer
     server *Server
+}
+
+func (game *Game) GetMaster() string {
+    if game.master != nil {
+        return game.master.GetName()
+    }
+    return ""
 }
 
 func (game *Game) GetClientsOnline() []*Client {
@@ -134,28 +134,24 @@ func (game *Game) GetClientsOnline() []*Client {
     return online
 }
 
-func (game *Game) Whoami(client *Client) {
-    m := WhoamiMessage{client.name, client.isMaster, "whoami"}
-    b, _ := json.Marshal(m)
-    client.outcoming <- string(b)
+func (game *Game) UpdateClients() {
+    for _, client := range game.Clients {
+        m := Message{"whoami", client.GetName(), "", game.GetMaster(), game.state}
+        client.outcoming <- m.ToString()
+    }
 }
 
 func (game *Game) SystemMsg(data string, notify bool) {
-    fmt.Println(data)
     if notify {
         game.notifyListener(fmt.Sprintf("(system) %s", data))
     }
 }
 
-func (game *Game) Broadcast(data string) {
-    // if data doesn't end in EOL, add one
-    if !strings.HasSuffix(data, string(settings.EOL)) {
-        data = data + string(settings.EOL)
-    }
+func (game *Game) Broadcast(msg string) {
     for _, client := range game.GetClientsOnline() {
-        client.outcoming <- data
+        client.outcoming <- msg
     }
-    game.notifyListener(fmt.Sprintf("(broadcast) %s", data))
+    game.notifyListener(fmt.Sprintf("(broadcast) %s", msg))
 }
 
 func (game *Game) Inform(data string, client *Client) {
@@ -172,6 +168,9 @@ func (game *Game) Reset() {
     game.state = "game"
     game.time = false
     game.buttonPressed = nil
+    if game.timer != nil {
+        game.timer.Stop()
+    }
     for _, client := range game.GetClientsOnline() {
         client.canAnswer = true
     }
@@ -218,10 +217,26 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
     }
     game.buttonPressed = nil
     game.time = true
-    go func() {
-        game.timeout <- <- time.After(
-            time.Duration(seconds) * time.Second)
-        }()
+    // hope timer spawn is ok in terms of resources
+    timeoutFunc :=  func() {
+        if game.buttonPressed == nil {
+            game.state = "timeout"
+            game.Broadcast("===========Time is Out===========")
+        }
+    }
+    if seconds > 5 {
+        game.timer = time.AfterFunc(
+            time.Duration(seconds - 5) * time.Second, 
+            func() {
+                if game.buttonPressed == nil {
+                    game.state = "5sec"
+                    game.Broadcast("5 seconds left")
+                }
+                game.timer = time.AfterFunc(time.Duration(5) * time.Second, timeoutFunc)
+            })
+    } else {
+        game.timer = time.AfterFunc(time.Duration(seconds) * time.Second, timeoutFunc)
+    }
     game.Broadcast(fmt.Sprintf("===========%d seconds===========", seconds))
 }
 
@@ -240,7 +255,7 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
             return
         }
         game.SetMaster(client)
-        game.Whoami(client)
+        game.UpdateClients()
         game.Broadcast(fmt.Sprintf("%s is now the master of the game", client.GetName()))
     }  else if cmdParts[0] == ":time" {
         game.procTimeCmd(cmdParts, client)
@@ -286,7 +301,9 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
 
 func (game *Game) procEventLoop(client *Client) {
     for {
-        data := <- client.incoming
+        msgString := <- client.incoming
+        // XXX yuck, error handling
+        data := FromString(msgString).Text
         if strings.HasPrefix(data, ":") {
             game.ProcessCommand(data, client)
         } else if data == "\n" {
@@ -307,19 +324,17 @@ func (game *Game) procEventLoop(client *Client) {
                 continue
             }
             game.buttonPressed = client
+            game.state = "answer"
             game.Broadcast(fmt.Sprintf(
                 "%s, your answer?", game.buttonPressed.GetName()))
-            } else if game.state == "game" && client == game.buttonPressed && client.canAnswer {
+            } else if game.state == "answer" && client == game.buttonPressed && client.canAnswer {
                 // answering a question in game mode
-                fmt.Println("answer" + client.GetName())
                 client.canAnswer = false
-                toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
-                game.incoming <- toSend
-                game.buttonPressed = nil
+                game.incoming <- msgString 
+                game.state = "game"
             } else if game.state == "chat" {
                 // chat mode
-                toSend := fmt.Sprintf("[%s] %s", client.GetName(), data)
-                game.incoming <- toSend
+                game.incoming <- msgString
             } else {
                 game.Inform("You can't chat right now!", client)
             }
@@ -339,7 +354,7 @@ func (game *Game) Join(conn *websocket.Conn) *Client {
                     len(game.GetClientsOnline())),
         true)
     // send client his registration data
-    game.Whoami(client)
+    game.UpdateClients()
     game.Broadcast(fmt.Sprintf("'%s' has joined us!", client.GetName()))
     go game.procEventLoop(client)
     return client
@@ -359,11 +374,6 @@ func (game *Game) Listen() {
             select {
             case data := <-game.incoming:
                 game.Broadcast(data)
-            case <- game.timeout:
-                if game.buttonPressed == nil {
-                    game.Broadcast("===========Time is Out===========")
-                    game.Reset()
-                }
             case <- game.exit:
                 game.SystemMsg("Closing client connections..", false)
                 for _, cl := range game.GetClientsOnline() {
@@ -383,7 +393,6 @@ func (game *Game) Listen() {
 func NewGame() *Game {
     game := &Game{
         incoming: make(chan string),
-        timeout: make(chan time.Time),
         Clients: make([]*Client, 0),
         exit: make(chan bool, 1),
         state: "chat",
