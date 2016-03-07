@@ -99,7 +99,8 @@ $(".master").click(function() {
         return false;
     }
     // a hack, mind ids
-    cmd = ":" + this.id;
+    arr = this.id.split('_');
+    cmd = (":" + arr[0]) + (arr.length > 1 ? " " + arr[1] : "");
     conn.send(cmd);
     return false;
 });
