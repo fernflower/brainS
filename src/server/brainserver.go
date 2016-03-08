@@ -134,6 +134,22 @@ func (game *Game) GetClientsOnline() []*Client {
     return online
 }
 
+func (game *Game) sendClientsState() {
+    // sends a JSON in the from {'name': canAnswer}
+    clients := make(map[string]bool)
+    for _, cl := range game.GetClientsOnline() {
+        clients[cl.name] = cl.canAnswer
+    }
+    jsonstr, err := json.Marshal(clients)
+    utils.ProcError(err)
+    msg := Message{
+        "info", "Brain Bot", string(jsonstr),
+        game.GetMaster(), "updatePlayers"}
+    if game.master != nil {
+        game.master.outcoming <- msg.ToString()
+    }
+}
+
 func (game *Game) UpdateClients() {
     for _, client := range game.Clients {
         m := Message{"whoami", client.GetName(), "", game.GetMaster(), game.state}
@@ -222,6 +238,10 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
         if game.buttonPressed == nil {
             game.state = "timeout"
             game.Broadcast("===========Time is Out===========")
+            for _, cl := range game.Clients {
+                cl.canAnswer = false
+            }
+            game.sendClientsState()
         }
     }
     if seconds > 5 {
@@ -246,6 +266,7 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
         newName := strings.Join(cmdParts[1:len(cmdParts)], " ")
         oldName := client.GetName()
         client.name = newName
+        game.UpdateClients()
         game.Broadcast(fmt.Sprintf("%s is now known as %s", oldName, newName))
     } else if cmdParts[0] == ":master" {
         if game.master != nil && client != game.master {
@@ -306,6 +327,7 @@ func (game *Game) procEventLoop(client *Client) {
         data := FromString(msgString).Text
         if strings.HasPrefix(data, ":") {
             game.ProcessCommand(data, client)
+            
         } else if data == "\n" {
             /* special case: in game mode ENTER press means button click
                a click prior :time command is considered as a false start
@@ -321,6 +343,7 @@ func (game *Game) procEventLoop(client *Client) {
             if !game.time {
                 game.Broadcast(fmt.Sprintf("%s has a false start!", client.GetName()))
                 client.canAnswer = false
+                game.sendClientsState()
                 continue
             }
             game.buttonPressed = client
@@ -338,6 +361,7 @@ func (game *Game) procEventLoop(client *Client) {
             } else {
                 game.Inform("You can't chat right now!", client)
             }
+            game.sendClientsState()
         }
 }
 
@@ -355,7 +379,11 @@ func (game *Game) Join(conn *websocket.Conn) *Client {
         true)
     // send client his registration data
     game.UpdateClients()
-    game.Broadcast(fmt.Sprintf("'%s' has joined us!", client.GetName()))
+    msg := Message{
+        "plain", "Brain Bot",
+        fmt.Sprintf("'%s' has joined us!", client.GetName()),
+        client.Game.GetMaster(), "new_player"}
+    game.Broadcast(msg.ToString())
     go game.procEventLoop(client)
     return client
 }
