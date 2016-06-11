@@ -61,4 +61,3 @@ func FormMessage(data string) Message {
                   Action: fetch("Action", "")}
     return msg
 }
-

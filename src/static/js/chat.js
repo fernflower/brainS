@@ -10,8 +10,20 @@ $(document).ready(function(){
     msg.focus();
 });
 
+// a callback for whoami
+function whoami(data) {
+    client = data.Name;
+    master = data.MasterName;
+    // hide control panel from all but master
+    if (master != "" && client != master) {
+        $("#master").hide()
+    }
+    return false;
+}
+
 // a callback for :listplayers command
 function updatePlayers(data) {
+    data = data.Text
     var players = $("#players");
 
     if (!isMaster()) {
@@ -140,20 +152,9 @@ $(function() {
         }
         conn.onmessage = function(evt) {
             data = JSON.parse(evt.data);
-            // XXX UNIFY control type! 
-            if (data.Type == "whoami") {
-                client = data.Name;
-                master = data.MasterName;
-                // hide control panel from all but master
-                if (master != "" && client != master) {
-                    $("#master").hide()
-                }
-                return false;
-            }
-            if (data.Type == "info") {
-                // XXX looks pretty ugly
-                // treat State as a callback to call
-                window[data.Action](data.Text);
+            if (data.Type == "control") {
+                // treat Action as a callback to call
+                window[data.Action](data);
                 return false;
             }
             var text = data.Text
