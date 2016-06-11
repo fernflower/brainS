@@ -140,6 +140,7 @@ $(function() {
         }
         conn.onmessage = function(evt) {
             data = JSON.parse(evt.data);
+            // XXX UNIFY control type! 
             if (data.Type == "whoami") {
                 client = data.Name;
                 master = data.MasterName;
@@ -152,7 +153,7 @@ $(function() {
             if (data.Type == "info") {
                 // XXX looks pretty ugly
                 // treat State as a callback to call
-                window[data.State](data.Text);
+                window[data.Action](data.Text);
                 return false;
             }
             var text = data.Text

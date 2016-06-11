@@ -15,100 +15,14 @@ import (
     "utils"
 )
 
-type Client struct {
-    // a reference to game played
-    Game *Game
-    name string
-    incoming chan string 
-    outcoming chan string
-    isMaster bool
-    canAnswer bool
-    conn *websocket.Conn
-    // if true then already cleaned up
-    disconnected bool
-}
-
-func (client *Client) GetName() string {
-    if client.isMaster {
-        return "(master) " + client.name
-    }
-    return client.name
-}
-
-func (client *Client) SetName(name string) {
-    client.name = name
-}
-
-func (client *Client) Read() {
-    game := client.Game
-    for {
-        _, p, err := client.conn.ReadMessage()
-        oe, ok := err.(*websocket.CloseError)
-        if ok && (oe.Code == websocket.CloseNormalClosure || oe.Code == websocket.CloseGoingAway ||
-        oe.Code == websocket.CloseNoStatusReceived) {
-            game.SystemMsg(
-                fmt.Sprintf("Client %s disconnected", client.conn.RemoteAddr()), true)
-                client.Exit()
-                return
-        }
-        if err != nil && client.disconnected {
-            // XXX FIXME this read should not occur at all!!!
-            game.SystemMsg("WARN: reading from a disconnected client", false)
-            return
-        }
-        utils.ProcError(err)
-        m := Message{"plain", client.GetName(), string(p), game.GetMaster(), game.state}
-        client.incoming <- m.ToString()
-    }
-}
-
-func (client *Client) Write() {
-    for data := range client.outcoming {
-        var s map[string] interface{}
-        if json.Unmarshal([]byte(data), &s) != nil {
-            // XXX FIXME too bad to assume that in case of plain broadcast/inform master says that 
-            msg := Message{"plain", "Brain Bot", data, client.Game.GetMaster(), client.Game.state}
-            client.conn.WriteJSON(msg)
-        } else {
-            client.conn.WriteJSON(s)
-        }
-    }
-}
-
-func (client *Client) Listen() {
-    go client.Read()
-    go client.Write()
-}
-
-func (client *Client) Exit() {
-    defer func() {
-        client.disconnected = true
-        client.conn.Close()
-    }()
-
-    game := client.Game
-    if game.master == client {
-        game.master = nil
-    }
-}
-
-func NewClient(conn *websocket.Conn, name string) *Client {
-    client := &Client{name: name,
-                     incoming: make(chan string),
-                     outcoming: make(chan string),
-                     canAnswer: true,
-                     conn: conn}
-    client.Listen()
-    return client
-}
-
 type Game struct {
-    Clients []*Client
-    incoming chan string
-    master *Client
-    buttonPressed *Client
+    // array of joined players
+    Players []*Player
     // chat, game, answer
-    state string
+    State string
+    incoming chan string
+    master *Player
+    buttonPressed *Player
     // true if countdown has started
     time bool
     // notify when client wants to exit
@@ -117,16 +31,16 @@ type Game struct {
     server *Server
 }
 
-func (game *Game) GetMaster() string {
+func (game *Game) Master() string {
     if game.master != nil {
-        return game.master.GetName()
+        return game.master.Name()
     }
     return ""
 }
 
-func (game *Game) GetClientsOnline() []*Client {
-    var online []*Client
-    for _, cl := range game.Clients {
+func (game *Game) GetPlayersOnline() []*Player {
+    var online []*Player
+    for _, cl := range game.Players {
         if !cl.disconnected {
             online = append(online, cl)
         }
@@ -134,26 +48,36 @@ func (game *Game) GetClientsOnline() []*Client {
     return online
 }
 
-func (game *Game) sendClientsState() {
+func (g *Game) formGameMessage(data string, msgType string, action string) Message {
+    msg := FormMessage(data)
+    msg.Type = msgType
+    msg.Action = action
+    msg.State = g.State
+    msg.MasterName = g.Master()
+    return msg
+}
+
+func (game *Game) sendPlayersState() {
     // sends a JSON in the from {'name': canAnswer}
     clients := make(map[string]bool)
-    for _, cl := range game.GetClientsOnline() {
+    for _, cl := range game.GetPlayersOnline() {
         clients[cl.name] = cl.canAnswer
     }
     jsonstr, err := json.Marshal(clients)
     utils.ProcError(err)
-    msg := Message{
-        "info", "Brain Bot", string(jsonstr),
-        game.GetMaster(), "updatePlayers"}
+    msg := game.formGameMessage(string(jsonstr), "info", "updatePlayers")
     if game.master != nil {
         game.master.outcoming <- msg.ToString()
     }
 }
 
-func (game *Game) UpdateClients() {
-    for _, client := range game.Clients {
-        m := Message{"whoami", client.GetName(), "", game.GetMaster(), game.state}
-        client.outcoming <- m.ToString()
+func (game *Game) UpdatePlayers() {
+    for _, client := range game.Players {
+        // XXX FIXME make all system messages of one type
+        msg := game.formGameMessage("", "whoami", "whoami")
+        // add client name
+        msg.Name = client.Name()
+        client.outcoming <- msg.ToString()
     }
 }
 
@@ -164,13 +88,13 @@ func (game *Game) SystemMsg(data string, notify bool) {
 }
 
 func (game *Game) Broadcast(msg string) {
-    for _, client := range game.GetClientsOnline() {
+    for _, client := range game.GetPlayersOnline() {
         client.outcoming <- msg
     }
     game.notifyListener(fmt.Sprintf("(broadcast) %s", msg))
 }
 
-func (game *Game) Inform(data string, client *Client) {
+func (game *Game) Inform(data string, client *Player) {
     // if data doesn't end in EOL, add one
     if !strings.HasSuffix(data, string(settings.EOL)) {
         data = data + string(settings.EOL)
@@ -181,18 +105,18 @@ func (game *Game) Inform(data string, client *Client) {
 
 // makes all clients be able to answer again
 func (game *Game) Reset() {
-    game.state = "game"
+    game.State = "game"
     game.time = false
     game.buttonPressed = nil
     if game.timer != nil {
         game.timer.Stop()
     }
-    for _, client := range game.GetClientsOnline() {
+    for _, client := range game.GetPlayersOnline() {
         client.canAnswer = true
     }
 }
 
-func (game *Game) SetMaster(client *Client) {
+func (game *Game) SetMaster(client *Player) {
     game.master = client
     client.isMaster = true
 }
@@ -210,7 +134,7 @@ func sanitizeCommandString(cmd string) []string {
     return cmdParts
 }
 
-func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
+func (game *Game) procTimeCmd(cmdParts []string, client *Player) {
     var seconds int
     var err error
     if len(cmdParts) > 1 {
@@ -223,7 +147,7 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
     } else {
         seconds = settings.RoundTimeout
     }
-    if game.state == "chat" {
+    if game.State == "chat" {
         game.Inform("Enter game mode first!", client)
         return
     }
@@ -236,12 +160,12 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
     // hope timer spawn is ok in terms of resources
     timeoutFunc :=  func() {
         if game.buttonPressed == nil {
-            game.state = "timeout"
+            game.State = "timeout"
             game.Broadcast("===========Time is Out===========")
-            for _, cl := range game.Clients {
+            for _, cl := range game.Players {
                 cl.canAnswer = false
             }
-            game.sendClientsState()
+            game.sendPlayersState()
         }
     }
     if seconds > 5 {
@@ -249,7 +173,7 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
             time.Duration(seconds - 5) * time.Second, 
             func() {
                 if game.buttonPressed == nil {
-                    game.state = "5sec"
+                    game.State = "5sec"
                     game.Broadcast("5 seconds left")
                 }
                 game.timer = time.AfterFunc(time.Duration(5) * time.Second, timeoutFunc)
@@ -260,24 +184,24 @@ func (game *Game) procTimeCmd(cmdParts []string, client *Client) {
     game.Broadcast(fmt.Sprintf("===========%d seconds===========", seconds))
 }
 
-func (game *Game) ProcessCommand(cmd string, client *Client) {
+func (game *Game) ProcessCommand(cmd string, client *Player) {
     cmdParts := sanitizeCommandString(cmd)
     if cmdParts[0] == ":rename" && len(cmdParts) == 2 {
         newName := strings.Join(cmdParts[1:len(cmdParts)], " ")
-        oldName := client.GetName()
+        oldName := client.Name()
         client.name = newName
-        game.UpdateClients()
+        game.UpdatePlayers()
         game.Broadcast(fmt.Sprintf("%s is now known as %s", oldName, newName))
     } else if cmdParts[0] == ":master" {
         if game.master != nil && client != game.master {
             // FIXME ping master first, make sure it exists
-            game.SystemMsg(fmt.Sprintf("%s attempted to seize the crown!", client.GetName()), false)
+            game.SystemMsg(fmt.Sprintf("%s attempted to seize the crown!", client.Name()), false)
             game.Inform("The game has a master already", client)
             return
         }
         game.SetMaster(client)
-        game.UpdateClients()
-        game.Broadcast(fmt.Sprintf("%s is now the master of the game", client.GetName()))
+        game.UpdatePlayers()
+        game.Broadcast(fmt.Sprintf("%s is now the master of the game", client.Name()))
     }  else if cmdParts[0] == ":time" {
         game.procTimeCmd(cmdParts, client)
     } else if cmdParts[0] == ":reset" {
@@ -285,7 +209,7 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
             game.Inform("Only master can reset the game!", client)
             return
         }
-        if game.state == "chat" {
+        if game.State == "chat" {
             game.Inform("Enter game mode first!", client)
             return
         }
@@ -297,7 +221,7 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
             return
         }
         game.Reset()
-        game.state = "game"
+        game.State = "game"
         game.Broadcast("===========Game Mode On===========")
     } else if cmdParts[0] == ":chat" {
         if game.master != client {
@@ -305,7 +229,7 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
             return
         }
         game.Reset()
-        game.state = "chat"
+        game.State = "chat"
         game.Broadcast("===========Chat Mode On===========")
     } else if cmdParts[0] == ":exit" {
         if game.master != client {
@@ -320,10 +244,11 @@ func (game *Game) ProcessCommand(cmd string, client *Client) {
     }
 }
 
-func (game *Game) procEventLoop(client *Client) {
+func (game *Game) procEventLoop(client *Player) {
     for {
         msgString := <- client.incoming
         // XXX yuck, error handling
+        fmt.Println(msgString)
         data := FromString(msgString).Text
         if strings.HasPrefix(data, ":") {
             game.ProcessCommand(data, client)
@@ -332,7 +257,7 @@ func (game *Game) procEventLoop(client *Client) {
             /* special case: in game mode ENTER press means button click
                a click prior :time command is considered as a false start
             */
-            if game.state == "chat" {
+            if game.State == "chat" {
                 // do not send empty messages when chatting, that's not polite!
                 continue
             }
@@ -341,48 +266,49 @@ func (game *Game) procEventLoop(client *Client) {
                 continue
             }
             if !game.time {
-                game.Broadcast(fmt.Sprintf("%s has a false start!", client.GetName()))
+                game.Broadcast(fmt.Sprintf("%s has a false start!", client.Name()))
                 client.canAnswer = false
-                game.sendClientsState()
+                game.sendPlayersState()
                 continue
             }
             game.buttonPressed = client
-            game.state = "answer"
+            game.State = "answer"
             game.Broadcast(fmt.Sprintf(
-                "%s, your answer?", game.buttonPressed.GetName()))
-            } else if game.state == "answer" && client == game.buttonPressed && client.canAnswer {
+                "%s, your answer?", game.buttonPressed.Name()))
+            } else if game.State == "answer" && client == game.buttonPressed && client.canAnswer {
                 // answering a question in game mode
                 client.canAnswer = false
                 game.incoming <- msgString 
-                game.state = "game"
-            } else if game.state == "chat" {
+                game.State = "game"
+            } else if game.State == "chat" {
                 // chat mode
                 game.incoming <- msgString
             } else {
                 game.Inform("You can't chat right now!", client)
             }
-            game.sendClientsState()
+            game.sendPlayersState()
         }
 }
 
-func (game *Game) Join(conn *websocket.Conn) *Client {
-    clientNum := strconv.Itoa(len(game.Clients) + 1)
-    client := NewClient(
+func (game *Game) Join(conn *websocket.Conn) *Player {
+    clientNum := strconv.Itoa(len(game.Players) + 1)
+    client := NewPlayer(
         conn, fmt.Sprintf("anonymous player %s", clientNum))
     // add client-game reference
     client.Game = game
-    game.Clients = append(game.Clients, client)
+    game.Players = append(game.Players, client)
     game.SystemMsg(
         fmt.Sprintf("'%s' has joined (%s). Total clients: %d",
                     client.name, client.conn.RemoteAddr(),
-                    len(game.GetClientsOnline())),
+                    len(game.GetPlayersOnline())),
         true)
     // send client his registration data
-    game.UpdateClients()
-    msg := Message{
-        "plain", "Brain Bot",
-        fmt.Sprintf("'%s' has joined us!", client.GetName()),
-        client.Game.GetMaster(), "new_player"}
+    game.UpdatePlayers()
+    msg := game.formGameMessage(
+        fmt.Sprintf("'%s' has joined us!", client.Name()),
+        "plain",
+        // currently unused in UI implementation
+        "newPlayer")
     game.Broadcast(msg.ToString())
     go game.procEventLoop(client)
     return client
@@ -404,12 +330,12 @@ func (game *Game) Listen() {
                 game.Broadcast(data)
             case <- game.exit:
                 game.SystemMsg("Closing client connections..", false)
-                for _, cl := range game.GetClientsOnline() {
+                for _, cl := range game.GetPlayersOnline() {
                     game.SystemMsg(fmt.Sprintf("Disconnecting client %s", cl.conn.RemoteAddr()), false)
                     cl.Exit()
                 }
                 // for bug-evading purposes only
-                game.SystemMsg(fmt.Sprintf("Done! Clients left: %d", len(game.GetClientsOnline())), true)
+                game.SystemMsg(fmt.Sprintf("Done! Players left: %d", len(game.GetPlayersOnline())), true)
                 game.SystemMsg("Shutting down server..", false)
                 game.server.listener.Stop()
                 return
@@ -421,9 +347,9 @@ func (game *Game) Listen() {
 func NewGame() *Game {
     game := &Game{
         incoming: make(chan string),
-        Clients: make([]*Client, 0),
+        Players: make([]*Player, 0),
         exit: make(chan bool, 1),
-        state: "chat",
+        State: "chat",
     }
     game.Listen()
 
@@ -459,8 +385,7 @@ func NewServer(host string, port int, stateCh chan string) (*Server) {
     sl, err := listener.New(ln)
     utils.ProcError(err)
     httpServer := &http.Server{Addr: fmt.Sprintf("%s:%d", host, port)}
-    s := &Server{httpServer, make([]*Game, 0), make(chan websocket.Conn), sl, stateCh}
-    return s
+    return &Server{httpServer, make([]*Game, 0), make(chan websocket.Conn), sl, stateCh}
 }
 
 func (s *Server) Start(){
